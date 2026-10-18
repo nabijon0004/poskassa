@@ -297,3 +297,21 @@ def test_existing_cashiers_keep_shift_access_after_upgrade(tmp_path, monkeypatch
     main.initialize_db()
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT can_manage_shift FROM cashiers").fetchone()[0] == 1
+
+
+def test_shift_closes_without_counted_cash_when_cashier_logs_out(client):
+    add_cashier(client)
+    headers = login(client)
+    open_shift(client, headers, "100")
+    sale = sell(client, headers, {"items": [{"product_id": "4", "quantity": 1}], "payment_method": "cash"})
+    assert sale.status_code == 201
+    closed = client.post("/api/pos/shifts/close", headers=headers, json={"print_report": False})
+    assert closed.status_code == 200, closed.text
+    report = closed.json()
+    assert report["counted_cash"] is None
+    assert report["difference"] is None
+    assert report["expected_cash"] == 113
+    assert report["print_status"] == "not_requested"
+    assert client.get("/api/pos/session", headers=headers).json()["shift"] is None
+    shifts = client.get("/api/admin/shifts", headers=ADMIN).json()
+    assert shifts[0]["open"] is False and shifts[0]["counted_cash"] is None

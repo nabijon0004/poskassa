@@ -221,7 +221,7 @@ async function refreshOfflineData(force = false) {
 
 // The shift known without the server: one opened offline, or the last one the server reported.
 function offlineShift() {
-  const opened = offline.outbox.find((operation) => operation.type === "open_shift");
+  const opened = offline.ownOperations().find((operation) => operation.type === "open_shift");
   if (opened) return { id: null, offline: true, opened_at: opened.at, opening_cash: Number(opened.opening_cash), cashier_name: opened.cashier_name };
   return offline.usableData()?.shift || null;
 }
@@ -556,7 +556,7 @@ function renderMain() {
     state.tab = button.dataset.tab;
     renderMain();
   }));
-  app.querySelector("#logout").addEventListener("click", () => signOut());
+  app.querySelector("#logout").addEventListener("click", logOutAndCloseShift);
   const body = app.querySelector("#posBody");
   if (state.tab === "sale") renderSale(body);
   if (state.tab === "kiosk") renderKioskOrders(body);
@@ -564,6 +564,36 @@ function renderMain() {
   if (state.tab === "history") renderHistory(body);
   if (state.tab === "shift") renderShift(body);
   updateNetStatus();
+}
+
+// Logging out closes the open shift (without counting the cash and without showing the totals).
+// A cashier without shift access just logs out: the shift was opened by someone else.
+async function logOutAndCloseShift() {
+  if (!state.shift || !state.cashier.can_manage_shift) {
+    signOut();
+    return;
+  }
+  if (state.offline || !state.token || offline.ownOperations().length) {
+    const leave = await confirmDialog(
+      "Смена не будет закрыта",
+      "Нет связи с сервером или есть неотправленные продажи. Смену можно закрыть, когда связь восстановится и продажи будут отправлены.",
+      "Всё равно выйти",
+    );
+    if (leave) signOut();
+    return;
+  }
+  if (!await confirmDialog("Выйти и закрыть смену?", "Смена будет закрыта автоматически.", "Закрыть смену и выйти", false)) return;
+  try {
+    await api("/api/pos/shifts/close", { method: "POST", body: { print_report: false } });
+  } catch (exc) {
+    showToast(exc.message, true);
+    return;
+  }
+  window.clearInterval(pollTimer);
+  state.shift = null;
+  offline.rememberShift(null);
+  showToast("Смена закрыта");
+  signOut();
 }
 
 function preparingOrders() {

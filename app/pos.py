@@ -83,7 +83,8 @@ class OpenShiftInput(BaseModel):
 class CloseShiftInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    counted_cash: Decimal = Field(ge=0, le=1_000_000, decimal_places=2)
+    # None: closed without counting the cash (automatically, when the cashier logs out).
+    counted_cash: Decimal | None = Field(default=None, ge=0, le=1_000_000, decimal_places=2)
     print_report: bool = True
 
 
@@ -593,7 +594,10 @@ def close_shift(payload: CloseShiftInput, x_pos_token: PosToken = None) -> dict[
             raise HTTPException(status_code=409, detail="Смена не открыта.")
         connection.execute(
             "UPDATE shifts SET closed_at = ?, closed_by = ?, counted_cash = ? WHERE id = ?",
-            (now_iso(), context.cashier["id"], money(payload.counted_cash), shift["id"]),
+            (
+                now_iso(), context.cashier["id"],
+                money(payload.counted_cash) if payload.counted_cash is not None else None, shift["id"],
+            ),
         )
         closed = connection.execute("SELECT * FROM shifts WHERE id = ?", (shift["id"],)).fetchone()
         report = shift_report(connection, closed)

@@ -12,6 +12,15 @@ const paprikaDevice = (() => {
     try { window.localStorage.setItem(DEVICE_KEY_STORAGE, key); } catch { /* storage blocked */ }
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
   }
+  // An activation link opened on a page that is already open changes only the "#" part:
+  // keep the new key and start the page again with it.
+  window.addEventListener("hashchange", () => {
+    const next = window.location.hash.match(/activate=([A-Za-z0-9_-]+)/);
+    if (!next) return;
+    try { window.localStorage.setItem(DEVICE_KEY_STORAGE, next[1]); } catch { /* storage blocked */ }
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    window.location.reload();
+  });
   return {
     get key() { return key; },
     headers() { return key ? { "X-Device-Key": key } : {}; },

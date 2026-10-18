@@ -44,9 +44,11 @@ const offline = {
 
   get outbox() { return this.read(OUTBOX_KEY, []); },
 
+  // Each operation remembers the register it was made on: if this computer is switched to a
+  // register of another store, sales not sent yet still go to their own store.
   enqueue(operation) {
     const outbox = this.outbox;
-    outbox.push(operation);
+    outbox.push({ ...operation, device_key: paprikaDevice.key });
     if (!this.write(OUTBOX_KEY, outbox)) throw new Error("Не удалось сохранить продажу на этом компьютере.");
   },
 
@@ -107,14 +109,24 @@ const offline = {
 
   // --- sync -------------------------------------------------------------------------
 
+  // Operations made on this register (older ones without a key belong to it too).
+  ownOperations() {
+    return this.outbox.filter((operation) => !operation.device_key || operation.device_key === paprikaDevice.key);
+  },
+
   async sync() {
-    const operations = this.outbox;
-    if (!operations.length) return { synced: 0, error: null };
+    const outbox = this.outbox;
+    if (!outbox.length) return { synced: 0, error: null };
+    // Send the oldest register's operations first, each with that register's key.
+    const key = outbox[0].device_key || paprikaDevice.key;
+    const operations = outbox.filter((operation) => (operation.device_key || paprikaDevice.key) === key);
     const response = await fetch("/api/pos/offline-sync", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...paprikaDevice.headers() },
-      // cashier_name is kept only for this register's screens.
-      body: JSON.stringify({ operations: operations.slice(0, 200).map(({ cashier_name: _name, ...operation }) => operation) }),
+      headers: { "Content-Type": "application/json", "X-Device-Key": key },
+      // cashier_name and device_key are kept only on this computer.
+      body: JSON.stringify({
+        operations: operations.slice(0, 200).map(({ cashier_name: _name, device_key: _key, ...operation }) => operation),
+      }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
