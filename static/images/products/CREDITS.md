@@ -1,0 +1,48 @@
+# Product photo credits
+
+Photos found via Openverse, cropped to 4:3 and resized to 800x600.
+
+- `burger-beef.jpg` — «Cheese Lover's Burger at Barney's Gourmet Hamburgers» by pointnshoot, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/18244673@N00/408384715
+- `burger-chef.jpg` — «Gourmet Burger» by convex02l, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/98506817@N00/2966751188
+- `burger-chef-chicken.jpg` — «pdq crispy chicken sandwich» by eknott@pdqfreshfoodfast.com, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/60683780@N07/5577439043
+- `burger-chicken.jpg` — «Chicken Burger and Vegie Caesar Salad - Dicky Knees Cafe, Falls Creek» by avlxyz, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/10559879@N00/1039357715
+- `burger-deluxe.jpg` — «Homemade Burger» by Ruocaled, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/54063325@N07/9755972015
+- `cheeseburger.jpg` — «Nau's Enfield Drug - Large Bacon Cheeseburger» by BurgerAustin, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/42022505@N03/5007282483
+- `coca-cola.jpg` — «Vintage Coca-Cola bottles» by Kassie Mary, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/57404293@N08/5590891689
+- `fanta.jpg` — «Fanta-Orange-Can-330ml__84177» by Public Domain Photos, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/28958738@N06/7116950883
+- `fries.jpg` — «french fries» by stu_spivack, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/35034346243@N01/6848654347
+- `iced-tea.jpg` — «A peach ice tea» by Geoffreyrabbit, CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/). Source: https://commons.wikimedia.org/w/index.php?curid=87670651
+- `juice.jpg` — «Juiced» by ashleigh290, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/16440393@N04/2779666557
+- `ketchup.jpg` — «Heinz ketchup - 57 varieties» by Leonid Mamchenkov, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/37165469@N00/218374286
+- `kids-juice.jpg` — «Guava Juice Box» by divadnart, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/88845568@N00/867124917
+- `mojito.jpg` — «Green Tea Mojito» by PersonalCreations.com, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/127294011@N07/15072446911
+- `nuggets.jpg` — «2022-04-13 19 18 03 A chicken nugget from Chick-fil-A at the Wingate by Wyndham hotel in Chantilly, Fairfax County, Virginia» by Famartin, CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/). Source: https://commons.wikimedia.org/w/index.php?curid=116869248
+- `pepsi.jpg` — «Pepsi bottle» by Håkan Dahlström, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/93755244@N00/7824614306
+- `pizza-bbq.jpg` — «Grilled gluten-free BBQ chicken pizza» by Gudlyf, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/80093862@N00/3647617987
+- `pizza-caesar.jpg` — «Caesar pizza - egg - Bimbo Deluxe AUD8.90» by avlxyz, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/10559879@N00/5085681459
+- `pizza-capricciosa.jpg` — «Capricciosa - Niagara Hotel Mon-Thu AUD10 with drink» by avlxyz, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/10559879@N00/4988732615
+- `pizza-chicken.jpg` — «Buffalo Chicken Pizza» by ginnerobot, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/78011127@N00/2765425450
+- `pizza-four-cheese.jpg` — «toby's public house quattro formaggi» by goodiesfirst, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/49215102@N00/4344770705
+- `pizza-four-seasons.jpg` — «Quattro Stagioni @ Spacca Napoli» by get directly down, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/65172294@N00/132431495
+- `pizza-hawaiian.jpg` — «Athena Pizza - Hawaiian Pizza» by elsie.hui, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/91188380@N05/15452035777
+- `pizza-house.jpg` — «Audrey Deluxe pizza - Miss Libertine AUD6.50» by avlxyz, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/10559879@N00/3313987440
+- `pizza-margherita.jpg` — «Margherita pizza @ Verace Pizzeria and Enoteca» by Ruocaled, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/54063325@N07/6688627287
+- `pizza-meat.jpg` — «Montreal Smoked Meat Pizza» by mick62, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/8509783@N03/2842102460
+- `pizza-meat-assorted.jpg` — «Sammy's Pizza Falher Alberta Meat Lovers Pizza» by elsie.hui, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/91188380@N05/10354092396
+- `pizza-meat-feast.jpg` — «Mmm... pizza» by jeffreyw, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/7927684@N03/15382188366
+- `pizza-pepperoni.jpg` — «Pepperoni Pizza from Joseph's» by Tom Ipri, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/34989799@N00/6546210445
+- `pizza-salami.jpg` — «Chorizo & Salami pizza» by sebilden, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/81677556@N00/4632755275
+- `pizza-supreme.jpg` — «Supreme Pizza» by @joefoodie, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/98178986@N00/3632421249
+- `quesadilla.jpg` — «Quesadillas with Pollo Asado» by Mike Saechang, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/7390466@N06/7205464648
+- `rc-cola.jpg` — «RC Cola bottle» by afiler, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/99909734@N00/860537283
+- `sauce-cheese.jpg` — «Rico’s Salsa De Queso Nacho Cheese Sauce» by theimpulsivebuy, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/27410581@N07/3976656208
+- `sauce-garlic.jpg` — «French Fries with aioli - The Lounge Downstairs AUD6» by avlxyz, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/10559879@N00/3469714003
+- `soda-cup.jpg` — «Horchata and Jarritos Mandarin Fountain Drinks 7-Eleven» by Phillip Pessar, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/25955895@N03/52745091381
+- `strips.jpg` — «I'm a Sucker for Chicken Tenders and Fries» by Rusty Clark ~ 100K Photos, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/23206546@N04/5885680617
+- `strips-spicy.jpg` — «Mmm... chicken fingers with a sweet and hot chili sauce» by jeffreyw, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/7927684@N03/7531233340
+- `water.jpg` — «Bottled water» by TheDigitel Myrtle Beach, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/63360473@N08/6972595593
+- `wedges.jpg` — «Potato Wedges with Lemon and Rosemary» by megan.chromik, CC BY-SA 2.0 (https://creativecommons.org/licenses/by-sa/2.0/). Source: https://www.flickr.com/photos/17796522@N08/3462956070
+- `wings.jpg` — «Fried chicken wings» by rick, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/35034361412@N01/2441131691
+- `wings-hot.jpg` — «Buffalo Wings - Ray's Original Wings - Omaha, NE» by vwcampin, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/125112383@N06/37514383841
+- `wrap-beef.jpg` — «roast beef wraps» by Jessie Pearl, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/21656109@N00/1085903173
+- `wrap-chicken.jpg` — «vegetarian buffalo chicken wrap» by Thriving Vegetarian, CC BY 2.0 (https://creativecommons.org/licenses/by/2.0/). Source: https://www.flickr.com/photos/90155432@N02/8462205332
