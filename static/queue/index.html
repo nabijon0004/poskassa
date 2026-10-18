@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#1f1c18">
+    <title>Paprika — Очередь заказов</title>
+    <link rel="stylesheet" href="/assets/queue.css">
+  </head>
+  <body>
+    <header class="queue-header">
+      <div class="brand"><img src="/logo.jpg" alt=""><span>Paprika</span><small id="storeName"></small></div>
+      <div class="header-side">
+        <span class="offline" id="offline" hidden>Нет связи</span>
+        <button class="sound" id="sound" type="button">🔔 Включить звук</button>
+        <time class="clock" id="clock"></time>
+      </div>
+    </header>
+    <main class="board">
+      <section class="column preparing">
+        <h1>Готовится<small>Тайёр карда мешавад · Preparing</small></h1>
+        <div class="numbers" id="preparing"></div>
+      </section>
+      <section class="column ready">
+        <h1>Готово<small>Тайёр · Ready</small></h1>
+        <div class="numbers" id="ready"></div>
+      </section>
+    </main>
+    <script src="/device.js" defer></script>
+    <script src="/voice.js" defer></script>
+    <script src="/assets/queue.js" defer></script>
+  </body>
+</html>

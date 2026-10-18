@@ -4,7 +4,6 @@ const appState = {
   cart: [],
   screen: "home",
   currency: "с",
-  adminToken: "",
   pendingSubmission: null,
   orderComment: "",
   serviceType: null,
@@ -76,12 +75,14 @@ function newIdempotencyKey() {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...paprikaDevice.headers(), ...(options.headers || {}) },
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     // Server messages are in Russian; other languages get a translated generic text.
-    throw new Error(currentLanguage === DEFAULT_LANGUAGE && data.detail ? data.detail : t(path === "/api/orders" ? "error.order" : "error.generic"));
+    const error = new Error(currentLanguage === DEFAULT_LANGUAGE && data.detail ? data.detail : t(path === "/api/orders" ? "error.order" : "error.generic"));
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -613,6 +614,7 @@ async function submitOrder(event) {
     const order = await sendPendingOrder();
     appState.screen = "success";
     renderSuccess(order);
+    announceOrder(order);
   } catch (error) {
     showNotice(error.message);
     appState.screen = "confirm";
@@ -646,6 +648,7 @@ function showPendingOrderRecovery() {
     .then((order) => {
       appState.screen = "success";
       renderSuccess(order);
+      announceOrder(order);
     })
     .catch((error) => {
       const message = document.querySelector("#pendingRecoveryMessage");
@@ -659,9 +662,32 @@ function showPendingOrderRecovery() {
     });
 }
 
+// Windows usually has no Tajik voice: Tajik text is then read by a Russian voice
+// with the Tajik letters replaced by the closest Russian ones.
+const TAJIK_TO_RUSSIAN = { "ғ": "г", "ӣ": "и", "қ": "к", "ӯ": "у", "ҳ": "х", "ҷ": "ч" };
+
+async function announceOrder(order) {
+  try {
+    let text = t("voice.accepted", { number: order.order_number });
+    let language = LANGUAGES[currentLanguage].speech;
+    // There is no Tajik voice: the Tajik phrase is read by the Russian voice.
+    if (currentLanguage === "tg") {
+      language = "ru-RU";
+      text = text.replace(/[ғӣқӯҳҷ]/gi, (char) => {
+        const replacement = TAJIK_TO_RUSSIAN[char.toLowerCase()];
+        return char === char.toLowerCase() ? replacement : replacement.toUpperCase();
+      });
+    }
+    await announce(text, language);
+  } catch {
+    // Speech is a convenience; the order number is on the screen anyway.
+  }
+}
+
 function renderSuccess(order) {
   appState.lastOrder = order;
-  const printMessage = order.print_status === "printed"
+  // "queued": the ticket is in the store's print queue and the register program prints it.
+  const printMessage = ["printed", "queued"].includes(order.print_status)
     ? t(order.comment ? "print.printedComment" : "print.printed")
     : order.print_status === "failed"
       ? t(order.comment ? "print.failedComment" : "print.failed")
@@ -698,401 +724,6 @@ function finishOrder() {
   render();
 }
 
-async function openAdmin() {
-  if (!appState.adminToken) {
-    const token = window.prompt("Введите код сотрудника");
-    if (token === null || !token.trim()) return;
-    appState.adminToken = token.trim();
-  }
-  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="modal admin-panel"><div class="modal-heading"><h2>Панель сотрудника</h2><button class="close-button" id="closeAdmin">×</button></div><p class="modal-description">Настройка меню, отчёты и печать заказов.</p><div id="adminContent">Загрузка…</div></section></div>`;
-  document.querySelector("#closeAdmin").addEventListener("click", closeAdmin);
-  try {
-    const headers = { Authorization: `Bearer ${appState.adminToken}` };
-    const today = new Date().toLocaleDateString("sv-SE");
-    const [printerSettings, orders, report, catalog] = await Promise.all([
-      api("/api/admin/printer", { headers }),
-      api("/api/admin/orders", { headers }),
-      api(`/api/admin/report?start_date=${today}&end_date=${today}`, { headers }),
-      api("/api/admin/products", { headers }),
-    ]);
-    const content = document.querySelector("#adminContent");
-    if (!content) return;
-    content.innerHTML = `
-      ${renderPrinterSettings(printerSettings)}
-      <section class="admin-products">
-        <div class="admin-section-heading"><h3>Товары в меню</h3><button class="small-button" id="addProduct">Добавить товар</button></div>
-        <p class="modal-description">Изменения сразу сохраняются в каталоге киоска.</p>
-        <div id="productEditor"></div>
-        <div id="adminProductList">${renderAdminProducts(catalog)}</div>
-      </section>
-      <section class="admin-report">
-        <div class="admin-section-heading"><h3>Отчёт по заказам</h3><span>За день</span></div>
-        <form id="reportFilters" class="report-filters">
-          <label>С даты<input type="date" id="reportStart" value="${today}" required></label>
-          <label>По дату<input type="date" id="reportEnd" value="${today}" required></label>
-          <button class="small-button" type="submit">Показать</button>
-        </form>
-        <div id="reportResults">${renderReport(report)}</div>
-        <button class="small-button report-export" id="exportReport">Скачать CSV</button>
-      </section>
-      <h3>Последние заказы</h3>
-      ${orders.length ? orders.map((order) => `<div class="admin-order"><span><strong>№ ${escapeHtml(order.order_number)}</strong> <small>${escapeHtml(new Date(order.created_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))} · ${escapeHtml(order.order_ref)}</small><br><small>${escapeHtml(money(order.total))}${order.service_type ? ` · ${TRANSLATIONS.ru[`service.${order.service_type}`]}` : ""} · ${escapeHtml(order.print_status)}${order.comment ? `<br>Комментарий: ${escapeHtml(order.comment)}` : ""}</small></span><button class="small-button" data-reprint="${escapeHtml(order.order_ref)}">Повторить печать</button></div>`).join("") : `<p class="modal-description">Заказов пока нет.</p>`}
-      <button class="text-button" id="adminLogout">Выйти из панели</button>`;
-    const loadReport = async (exportCsv = false) => {
-      const startDate = document.querySelector("#reportStart").value;
-      const endDate = document.querySelector("#reportEnd").value;
-      if (startDate > endDate) {
-        showNotice("Начальная дата не может быть позже конечной.");
-        return;
-      }
-      const query = `start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`;
-      if (exportCsv) {
-        try {
-          const response = await fetch(`/api/admin/report.csv?${query}`, { headers });
-          if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            throw new Error(error.detail || "Не удалось выгрузить отчёт.");
-          }
-          const blob = await response.blob();
-          const downloadUrl = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = downloadUrl;
-          link.download = `paprika-orders-${startDate}-${endDate}.csv`;
-          link.click();
-          URL.revokeObjectURL(downloadUrl);
-        } catch (error) { showNotice(error.message); }
-        return;
-      }
-      const results = document.querySelector("#reportResults");
-      results.textContent = "Загружаем отчёт…";
-      try {
-        const selectedReport = await api(`/api/admin/report?${query}`, { headers });
-        results.innerHTML = renderReport(selectedReport);
-      } catch (error) {
-        results.textContent = error.message;
-      }
-    };
-    content.querySelector("#reportFilters").addEventListener("submit", (event) => {
-      event.preventDefault();
-      loadReport();
-    });
-    content.querySelector("#exportReport").addEventListener("click", () => loadReport(true));
-    bindProductAdmin(content, catalog);
-    bindPrinterSettings(content, headers);
-    content.querySelectorAll("[data-reprint]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        try {
-          const printed = await api("/api/admin/print", {
-            method: "POST", headers,
-            body: JSON.stringify({ order_ref: button.dataset.reprint }),
-          });
-          showNotice(`Чек заказа № ${printed.order_number} отправлен на принтер.`);
-        } catch (error) { showNotice(error.message); }
-      });
-    });
-    content.querySelector("#adminLogout").addEventListener("click", () => {
-      appState.adminToken = "";
-      closeAdmin();
-    });
-  } catch (error) {
-    appState.adminToken = "";
-    const content = document.querySelector("#adminContent");
-    if (content) content.innerHTML = `<p class="modal-description">${escapeHtml(error.message)}</p><button class="small-button" id="retryAdmin">Повторить</button>`;
-    document.querySelector("#retryAdmin")?.addEventListener("click", openAdmin);
-  }
-}
-
-function renderAdminProducts(catalog) {
-  return catalog.products.map((product) => `
-    <div class="admin-product-row">
-      <img src="${escapeHtml(product.image)}" alt="" loading="lazy">
-      <div class="admin-product-info">
-        <strong>${escapeHtml(product.name)}</strong>
-        <small>${escapeHtml(catalog.categories.find((category) => category.id === product.category_id)?.name || "Категория не найдена")} · ${money(product.price)} / ${escapeHtml(product.unit)}</small>
-      </div>
-      <span class="product-priority" title="Приоритет">${product.priority ? `№ ${product.priority}` : ""}</span>
-      <span class="product-status ${product.available ? "is-available" : "is-unavailable"}">${product.available ? "В продаже" : "Скрыт"}</span>
-      <button class="small-button" data-edit-product="${escapeHtml(product.id)}">Изменить</button>
-    </div>`).join("");
-}
-
-function renderProductEditor(product, categories) {
-  const editing = Boolean(product);
-  return `
-    <form id="productEditorForm" class="product-editor">
-      <h4>${editing ? "Изменить товар" : "Новый товар"}</h4>
-      <label>Название<input name="name" maxlength="120" required value="${escapeHtml(product?.name || "")}"></label>
-      <div class="product-editor-fields">
-        <label>Цена<input name="price" type="number" min="0" max="99999999.99" step="0.01" required value="${editing ? product.price : ""}"></label>
-        <label>Приоритет<input name="priority" type="number" min="1" max="999" step="1" placeholder="—" value="${product?.priority ?? ""}"><small>1 — первым в списке. Пусто — без приоритета.</small></label>
-      </div>
-      <div class="product-editor-fields">
-        <label>Категория<select name="category_id" required>${categories.map((category) => `<option value="${escapeHtml(category.id)}" ${product?.category_id === category.id ? "selected" : ""}>${escapeHtml(category.name)}</option>`).join("")}</select></label>
-      </div>
-      ${editing ? "" : `<label>Единица<select name="unit"><option value="шт.">шт.</option><option value="кг">кг</option></select></label>`}
-      <label>Состав<textarea name="ingredients" maxlength="300" rows="3" placeholder="Например: томатный соус, моцарелла, пепперони">${escapeHtml(product?.ingredients || "")}</textarea><small>Показывается покупателю на карточке товара. Оставьте пустым, если состав не нужен.</small></label>
-      <label class="product-image-picker">Фотография<input name="image" type="file" accept="image/jpeg,image/png,image/webp"><small>JPEG, PNG или WebP, не более 5 МБ</small></label>
-      <label class="product-availability"><input name="available" type="checkbox" ${product?.available === false ? "" : "checked"}> Показывать товар в меню / доступен для заказа</label>
-      <div class="product-editor-actions"><button class="small-button" type="button" id="cancelProductEdit">Отмена</button><button class="small-button" type="submit">Сохранить</button></div>
-      <p id="productEditorMessage" class="product-editor-message" role="status"></p>
-    </form>`;
-}
-
-function bindProductAdmin(content, catalog) {
-  const editor = content.querySelector("#productEditor");
-  const headers = { Authorization: `Bearer ${appState.adminToken}` };
-  const reload = async () => {
-    const updatedCatalog = await api("/api/admin/products", { headers });
-    content.querySelector("#adminProductList").innerHTML = renderAdminProducts(updatedCatalog);
-    bindProductAdmin(content, updatedCatalog);
-    appState.menu = await api("/api/menu");
-  };
-  content.querySelector("#addProduct").onclick = () => {
-    editor.innerHTML = renderProductEditor(null, catalog.categories);
-    bindProductEditor(content, catalog, null, reload);
-  };
-  content.querySelectorAll("[data-edit-product]").forEach((button) => {
-    button.onclick = () => {
-      const product = catalog.products.find((entry) => entry.id === button.dataset.editProduct);
-      if (!product) return;
-      editor.innerHTML = renderProductEditor(product, catalog.categories);
-      bindProductEditor(content, catalog, product, reload);
-      editor.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    };
-  });
-}
-
-function bindProductEditor(content, catalog, product, reload) {
-  const editor = content.querySelector("#productEditor");
-  const form = editor.querySelector("#productEditorForm");
-  editor.querySelector("#cancelProductEdit").addEventListener("click", () => { editor.innerHTML = ""; });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const submitButton = form.querySelector('[type="submit"]');
-    const message = form.querySelector("#productEditorMessage");
-    submitButton.disabled = true;
-    message.textContent = "Сохраняем…";
-    const formData = new FormData(form);
-    const payload = {
-      name: formData.get("name"),
-      price: formData.get("price"),
-      category_id: formData.get("category_id"),
-      available: form.querySelector('[name="available"]').checked,
-      ingredients: formData.get("ingredients"),
-      priority: formData.get("priority") ? Number(formData.get("priority")) : null,
-    };
-    try {
-      const saved = await api(product ? `/api/admin/products/${encodeURIComponent(product.id)}` : "/api/admin/products", {
-        method: product ? "PUT" : "POST",
-        headers: { Authorization: `Bearer ${appState.adminToken}` },
-        body: JSON.stringify(product ? payload : { ...payload, unit: formData.get("unit") }),
-      });
-      product = saved;
-      const photo = form.querySelector('[name="image"]').files[0];
-      if (photo) {
-        const upload = new FormData();
-        upload.append("image", photo);
-        const response = await fetch(`/api/admin/products/${encodeURIComponent(saved.id)}/image`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${appState.adminToken}` },
-          body: upload,
-        });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(result.detail || "Не удалось загрузить фотографию.");
-      }
-      editor.innerHTML = "";
-      await reload();
-      showNotice("Товар сохранён.");
-    } catch (error) {
-      message.textContent = error.message;
-      submitButton.disabled = false;
-    }
-  });
-}
-
-function renderPrinterSettings(settings) {
-  const receipt = settings.receipt;
-  const checkbox = (name, label) => `<label class="printer-check"><input type="checkbox" name="${name}" ${receipt[name] ? "checked" : ""}> ${label}</label>`;
-  const option = (value, current, label) => `<option value="${value}" ${String(value) === String(current) ? "selected" : ""}>${label}</option>`;
-  return `
-    <section class="admin-products printer-settings">
-      <div class="admin-section-heading"><h3>Принтер и чек для кухни</h3><span>Чековый принтер 80 мм</span></div>
-      <form id="printerForm" class="printer-layout">
-        <div class="printer-fields">
-          <h4>Подключение</h4>
-          <div class="product-editor-fields">
-            <label>IP-адрес принтера<input name="host" value="${escapeHtml(settings.host)}" placeholder="192.168.1.50" maxlength="253" autocomplete="off"></label>
-            <label>Порт<input name="port" type="number" min="1" max="65535" value="${settings.port}" required></label>
-          </div>
-          <div class="product-editor-fields">
-            <label>Ширина строки<select name="chars_per_line">${option(48, settings.chars_per_line, "48 символов (обычно для 80 мм)")}${option(42, settings.chars_per_line, "42 символа")}</select></label>
-            <label>Кодировка<select name="encoding">${option("cp866", settings.encoding, "CP866 (русский)")}${option("cp1251", settings.encoding, "Windows-1251")}${settings.encoding !== "cp866" && settings.encoding !== "cp1251" ? option(escapeHtml(settings.encoding), settings.encoding, escapeHtml(settings.encoding)) : ""}</select></label>
-          </div>
-          <details class="printer-advanced">
-            <summary>Дополнительно</summary>
-            <div class="product-editor-fields">
-              <label>Кодовая страница ESC/POS<input name="codepage" type="number" min="0" max="255" value="${settings.codepage}" required><small>CP866 — обычно 17, Windows-1251 — обычно 46. Сверьте с инструкцией.</small></label>
-              <label>Ожидание ответа, сек<input name="timeout" type="number" min="0.5" max="30" step="0.5" value="${settings.timeout}" required></label>
-            </div>
-          </details>
-          <h4>Дизайн чека</h4>
-          <label>Заголовок<input name="header" maxlength="48" value="${escapeHtml(receipt.header)}" placeholder="КУХНЯ"></label>
-          <div class="product-editor-fields">
-            <label>Размер номера заказа<select name="number_size">${[1, 2, 3, 4].map((size) => option(size, receipt.number_size, size === 1 ? "Обычный" : `Крупный ×${size}`)).join("")}</select></label>
-            <label>Копий<select name="copies">${[1, 2, 3].map((count) => option(count, receipt.copies, count)).join("")}</select></label>
-          </div>
-          <div class="printer-checks">
-            ${checkbox("show_time", "Дата и время")}
-            ${checkbox("show_items", "Список блюд")}
-            ${checkbox("items_large", "Блюда крупным шрифтом")}
-            ${checkbox("show_prices", "Цены у блюд")}
-            ${checkbox("show_total", "Итоговая сумма")}
-            ${checkbox("show_comment", "Комментарий клиента")}
-            ${checkbox("show_service_type", "В зале / с собой")}
-            ${checkbox("cut", "Отрезать бумагу")}
-          </div>
-          <label>Нижняя строка<input name="footer" maxlength="96" value="${escapeHtml(receipt.footer)}" placeholder="Например: Приятного аппетита!"></label>
-          <label>Пустых строк перед отрезом<input name="feed_lines" type="number" min="0" max="10" value="${receipt.feed_lines}" required></label>
-          <p id="printerMessage" class="product-editor-message" role="status"></p>
-          <div class="printer-actions">
-            <button class="small-button" type="button" id="checkPrinter">Проверить связь</button>
-            <button class="small-button" type="button" id="testPrint">Печать пробного чека</button>
-            <button class="small-button primary-small" type="submit">Сохранить</button>
-          </div>
-        </div>
-        <div class="receipt-preview-wrap">
-          <h4>Как будет выглядеть</h4>
-          <div class="receipt-paper" id="receiptPreview"></div>
-          <small>Пример заказа. Вид на бумаге зависит от шрифта принтера.</small>
-        </div>
-      </form>
-    </section>`;
-}
-
-function readPrinterForm(form) {
-  const value = (name) => form.elements[name].value;
-  const checked = (name) => form.elements[name].checked;
-  return {
-    host: value("host").trim(),
-    port: Number(value("port")),
-    timeout: Number(value("timeout")),
-    chars_per_line: Number(value("chars_per_line")),
-    codepage: Number(value("codepage")),
-    encoding: value("encoding"),
-    receipt: {
-      header: value("header"),
-      number_size: Number(value("number_size")),
-      show_time: checked("show_time"),
-      show_items: checked("show_items"),
-      items_large: checked("items_large"),
-      show_prices: checked("show_prices"),
-      show_total: checked("show_total"),
-      show_comment: checked("show_comment"),
-      show_service_type: checked("show_service_type"),
-      footer: value("footer"),
-      copies: Number(value("copies")),
-      feed_lines: Number(value("feed_lines")),
-      cut: checked("cut"),
-    },
-  };
-}
-
-function renderReceiptPreview(preview) {
-  return preview.lines.map((line) => {
-    const style = [
-      `text-align:${line.align}`,
-      `font-weight:${line.bold ? 700 : 400}`,
-      `font-size:${line.width}em`,
-      line.height > line.width ? `transform:scaleY(${line.height / line.width});transform-origin:top;margin-bottom:${(line.height / line.width - 1) * 1.35}em` : "",
-    ].join(";");
-    return `<div class="receipt-row" style="${style}">${escapeHtml(line.text) || "&nbsp;"}</div>`;
-  }).join("");
-}
-
-function bindPrinterSettings(content, headers) {
-  const form = content.querySelector("#printerForm");
-  const message = form.querySelector("#printerMessage");
-  const preview = form.querySelector("#receiptPreview");
-  let previewTimer;
-  let previewRequest = 0;
-  const showMessage = (text, isError = false) => {
-    message.textContent = text;
-    message.classList.toggle("is-error", isError);
-  };
-  const refreshPreview = async () => {
-    const request = ++previewRequest;
-    try {
-      const result = await api("/api/admin/printer/preview", {
-        method: "POST", headers, body: JSON.stringify(readPrinterForm(form)),
-      });
-      if (request !== previewRequest) return;
-      preview.style.setProperty("--receipt-columns", result.chars_per_line);
-      preview.innerHTML = renderReceiptPreview(result);
-    } catch (error) {
-      if (request === previewRequest) showMessage(error.message, true);
-    }
-  };
-  const schedulePreview = () => {
-    window.clearTimeout(previewTimer);
-    previewTimer = window.setTimeout(refreshPreview, 250);
-  };
-  form.addEventListener("input", schedulePreview);
-  form.addEventListener("change", schedulePreview);
-  const runAction = async (button, path, successText) => {
-    button.disabled = true;
-    showMessage("Подождите…");
-    try {
-      const result = await api(path, { method: "POST", headers, body: JSON.stringify(readPrinterForm(form)) });
-      const ok = result.connected !== false;
-      showMessage(successText || result.message, !ok);
-    } catch (error) {
-      showMessage(error.message, true);
-    } finally {
-      button.disabled = false;
-    }
-  };
-  form.querySelector("#checkPrinter").addEventListener("click", (event) => runAction(event.currentTarget, "/api/admin/printer/check"));
-  form.querySelector("#testPrint").addEventListener("click", (event) => runAction(event.currentTarget, "/api/admin/printer/test"));
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = form.querySelector('[type="submit"]');
-    button.disabled = true;
-    try {
-      await api("/api/admin/printer", { method: "PUT", headers, body: JSON.stringify(readPrinterForm(form)) });
-      showMessage("Настройки сохранены. Новые заказы будут печататься так.");
-    } catch (error) {
-      showMessage(error.message, true);
-    } finally {
-      button.disabled = false;
-    }
-  });
-  refreshPreview();
-}
-
-function renderReport(report) {
-  const productRows = report.products.length
-    ? report.products.map((product) => `
-      <div class="report-product">
-        <span>${escapeHtml(product.name)}</span>
-        <strong>${product.quantity} ${escapeHtml(product.unit || "шт.")}${product.weight_grams ? `<small> · ≈ ${product.weight_grams} г всего</small>` : ""}</strong>
-        <span>${money(product.amount)}</span>
-      </div>`).join("")
-    : `<p class="report-empty">За выбранный период заказов нет.</p>`;
-  return `
-    <div class="report-metrics">
-      <div><span>Заказы</span><strong>${report.orders_count}</strong></div>
-      <div><span>Единиц товара</span><strong>${report.items_count}</strong></div>
-      <div><span>Сумма</span><strong>${money(report.total_amount)}</strong></div>
-      <div><span>Средний заказ</span><strong>${money(report.average_order_amount)}</strong></div>
-    </div>
-    <div class="report-product-list"><div class="report-product report-product-header"><span>Блюдо</span><span>Количество</span><span>Сумма</span></div>${productRows}</div>`;
-}
-
-function closeAdmin() {
-  appState.adminToken = "";
-  modalRoot.innerHTML = "";
-}
-
 function renderLanguageSwitch() {
   const container = document.querySelector("#languageSwitch");
   container.setAttribute("aria-label", t("lang.label"));
@@ -1115,7 +746,6 @@ function render() {
   document.querySelector(".topbar").hidden = appState.screen !== "home";
   renderLanguageSwitch();
   document.querySelector("#footerMessage").textContent = t("footer.message");
-  document.querySelector("#adminOpen").textContent = t("footer.staff");
   document.querySelector("#brandHome").setAttribute("aria-label", t("brand.home"));
 }
 
@@ -1123,9 +753,13 @@ document.querySelector("#brandHome").addEventListener("click", () => {
   if (appState.screen === "success") finishOrder();
   else { appState.screen = "home"; render(); }
 });
-document.querySelector("#adminOpen").addEventListener("click", openAdmin);
+function showKioskSetup(message) {
+  document.querySelector(".topbar").hidden = true;
+  showDeviceSetup(main, "Киоск не активирован", message);
+}
 
-api("/api/menu")
+if (!paprikaDevice.key) showKioskSetup("Этот киоск ещё не привязан к точке продаж.");
+else api("/api/menu")
   .then((menu) => {
     appState.menu = menu;
     appState.currency = menu.currency;
@@ -1140,6 +774,11 @@ api("/api/menu")
     }
   })
   .catch((error) => {
+    if (error.status === 401) {
+      paprikaDevice.forget();
+      showKioskSetup(error.message);
+      return;
+    }
     main.innerHTML = `<section class="load-error"><h1>${t("load.title")}</h1><p>${escapeHtml(error.message)}<br>${t("load.text")}</p><button class="primary-button" id="retryMenu">${t("load.retry")}</button></section>`;
     renderLanguageSwitch();
     document.querySelector("#retryMenu").addEventListener("click", () => window.location.reload());

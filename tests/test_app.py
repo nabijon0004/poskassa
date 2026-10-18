@@ -1,20 +1,12 @@
 import uuid
 from contextlib import closing
 
-import pytest
-from fastapi.testclient import TestClient
-
 from app import main
+from tests.conftest import take_print_jobs
 
 
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DB_PATH", tmp_path / "orders.sqlite3")
-    monkeypatch.setattr(main, "IMAGE_UPLOAD_DIR", tmp_path / "uploads")
-    monkeypatch.setattr(main, "ADMIN_TOKEN", "test-staff-secret")
-    monkeypatch.setattr(main, "PRINTER_HOST", "")
-    with TestClient(main.app) as test_client:
-        yield test_client
+def catalog():
+    return main.catalog_for(1)
 
 
 def test_menu_is_available_from_local_catalog(client):
@@ -33,7 +25,7 @@ def test_menu_is_available_from_local_catalog(client):
 
 def test_order_uses_server_prices_and_is_unpaid_and_idempotent(client):
     key = str(uuid.uuid4())
-    fractional_product = next(product for product in main.PRODUCTS if product.price == 2.5)
+    fractional_product = next(product for product in catalog().products if product.price == 2.5)
     payload = {
         "service_type": "dine_in",
         "items": [
@@ -119,7 +111,7 @@ def order_portion(client, kind, value, product_id="1"):
 
 def test_strips_and_wings_accept_any_weight_or_amount(client):
     for product_id in ("1", "2", "16", "90", "91"):
-        product = main.PRODUCT_BY_ID[product_id]
+        product = catalog().product_by_id[product_id]
         assert product.price == 95
         assert product.weighted.min_grams == 200
         assert product.weighted.max_grams == 3000
@@ -171,7 +163,7 @@ def test_hot_drinks_other_and_ice_cream_are_not_in_menu(client):
         category["id"] for category in menu["categories"]
     }
     for removed_id in ("11", "13", "26", "71", "77"):
-        assert removed_id not in main.PRODUCT_BY_ID
+        assert removed_id not in catalog().product_by_id
 
 
 def test_existing_order_mode_is_migrated_to_local(client):
@@ -195,7 +187,7 @@ def test_existing_order_mode_is_migrated_to_local(client):
             (created.json()["order_ref"],),
         ).fetchone()
     public_orders = client.get(
-        "/api/admin/orders",
+        "/api/admin/stores/1/orders",
         headers={"Authorization": "Bearer test-staff-secret"},
     ).json()
 
@@ -204,20 +196,7 @@ def test_existing_order_mode_is_migrated_to_local(client):
 
 
 def test_order_comment_is_limited_saved_and_printed(client, monkeypatch):
-    sent = []
-
-    class FakePrinter:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def sendall(self, data):
-            sent.append(data)
-
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
-    monkeypatch.setattr(main.socket, "create_connection", lambda *_args, **_kwargs: FakePrinter())
     comment = "Без лука"
     response = client.post(
         "/api/orders",
@@ -227,7 +206,8 @@ def test_order_comment_is_limited_saved_and_printed(client, monkeypatch):
 
     assert response.status_code == 201
     assert response.json()["comment"] == comment
-    assert response.json()["print_status"] == "printed"
+    assert response.json()["print_status"] == "queued"
+    _, sent = take_print_jobs(client)
     assert f"Комментарий: {comment}".encode("cp866") in sent[0]
     exported = client.get(
         "/api/admin/report.csv",
@@ -247,11 +227,11 @@ def test_order_comment_is_limited_saved_and_printed(client, monkeypatch):
 def test_admin_can_create_edit_and_upload_product_photo(client):
     headers = {"Authorization": "Bearer test-staff-secret"}
     created = client.post(
-        "/api/admin/products",
+        "/api/admin/stores/1/products",
         headers=headers,
         json={
             "name": "Тестовое блюдо",
-            "category_id": main.CATEGORIES[0].id,
+            "category_id": catalog().categories[0].id,
             "price": "12.50",
             "available": True,
             "unit": "шт.",
@@ -261,11 +241,11 @@ def test_admin_can_create_edit_and_upload_product_photo(client):
     assert created.status_code == 201
     product_id = created.json()["id"]
     edited = client.put(
-        f"/api/admin/products/{product_id}",
+        f"/api/admin/stores/1/products/{product_id}",
         headers=headers,
         json={
             "name": "Новое название",
-            "category_id": main.CATEGORIES[0].id,
+            "category_id": catalog().categories[0].id,
             "price": "15.75",
             "available": False,
         },
@@ -276,7 +256,7 @@ def test_admin_can_create_edit_and_upload_product_photo(client):
     assert edited.json()["available"] is False
 
     uploaded = client.post(
-        f"/api/admin/products/{product_id}/image",
+        f"/api/admin/stores/1/products/{product_id}/image",
         headers=headers,
         files={"image": ("product.jpg", b"\xff\xd8\xffimage-data", "image/jpeg")},
     )
@@ -286,7 +266,7 @@ def test_admin_can_create_edit_and_upload_product_photo(client):
     assert (main.IMAGE_UPLOAD_DIR / image_name).is_file()
 
     main.refresh_catalog()
-    persisted = client.get("/api/admin/products", headers=headers).json()
+    persisted = client.get("/api/admin/stores/1/products", headers=headers).json()
     saved = next(product for product in persisted["products"] if product["id"] == product_id)
     assert saved["name"] == "Новое название"
     assert saved["price"] == 15.75
@@ -301,7 +281,7 @@ def test_admin_can_create_edit_and_upload_product_photo(client):
 
 
 def test_report_preserves_fractional_prices_and_product_units(client):
-    product = next(product for product in main.PRODUCTS if product.price == 2.5)
+    product = next(product for product in catalog().products if product.price == 2.5)
     created = client.post(
         "/api/orders",
         headers={"Idempotency-Key": str(uuid.uuid4())},
@@ -309,7 +289,7 @@ def test_report_preserves_fractional_prices_and_product_units(client):
     )
     report = client.get(
         "/api/admin/report",
-        headers={"Authorization": f"Bearer {main.ADMIN_TOKEN}"},
+        headers={"Authorization": "Bearer test-staff-secret"},
     )
 
     assert created.status_code == 201
@@ -345,7 +325,7 @@ def test_weighted_portions_are_included_in_report_and_csv(client):
     assert report["products"] == [
         {
             "product_id": "1",
-            "name": main.PRODUCT_BY_ID["1"].name,
+            "name": catalog().product_by_id["1"].name,
             "unit": "порц.",
             "quantity": 2,
             "amount": 100,
@@ -374,46 +354,19 @@ def test_idempotency_key_cannot_be_reused_for_different_order(client):
     assert changed.status_code == 409
 
 
-def test_admin_endpoints_require_staff_token(client):
-    denied = client.get("/api/admin/status")
+def test_admin_endpoints_require_admin_login(client):
+    denied = client.get("/api/admin/stores")
     allowed = client.get(
-        "/api/admin/status",
+        "/api/admin/stores",
         headers={"Authorization": "Bearer test-staff-secret"},
     )
 
     assert denied.status_code == 401
     assert allowed.status_code == 200
-    assert "pos" not in allowed.json()
-    assert "printer" in allowed.json()
-
-
-class FakePrinter:
-    def __init__(self, sent, addresses=None, address=None):
-        self.sent = sent
-        if addresses is not None:
-            addresses.append(address)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return None
-
-    def sendall(self, data):
-        self.sent.append(data)
-
-
-def fake_printer(monkeypatch, sent, addresses=None):
-    monkeypatch.setattr(
-        main.socket,
-        "create_connection",
-        lambda address, **_kwargs: FakePrinter(sent, addresses, address),
-    )
+    assert allowed.json()[0]["name"] == "Paprika"
 
 
 def test_created_order_is_printed_once_as_kitchen_receipt(client, monkeypatch):
-    sent = []
-    fake_printer(monkeypatch, sent)
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
     key = str(uuid.uuid4())
     payload = {
@@ -427,14 +380,19 @@ def test_created_order_is_printed_once_as_kitchen_receipt(client, monkeypatch):
     retry = client.post("/api/orders", headers={"Idempotency-Key": key}, json=payload)
 
     assert response.status_code == 201
-    assert response.json()["print_status"] == "printed"
+    assert response.json()["print_status"] == "queued"
     assert retry.json()["order_number"] == response.json()["order_number"]
+    printer, sent = take_print_jobs(client)
+    assert printer["host"] == "printer.example"
     assert len(sent) == 1
+    assert take_print_jobs(client)[1] == []
+    orders = client.get("/api/admin/stores/1/orders", headers={"Authorization": "Bearer test-staff-secret"})
+    assert orders.json()[0]["print_status"] == "printed"
     data = sent[0]
     number = response.json()["order_number"].encode("ascii")
     assert data.startswith(b"\x1b@\x1bt\x11")
     assert b"\x1d!\x11" + number + b"\n" in data
-    assert f"2 x {main.PRODUCT_BY_ID['4'].name}".encode("cp866") in data
+    assert f"2 x {catalog().product_by_id['4'].name}".encode("cp866") in data
     assert "    500 г".encode("cp866") in data
     assert "ИТОГО".encode("cp866") in data
     assert "КУХНЯ".encode("cp866") in data
@@ -443,7 +401,7 @@ def test_created_order_is_printed_once_as_kitchen_receipt(client, monkeypatch):
 
 def test_staff_printer_settings_change_receipt_design(client, monkeypatch):
     headers = {"Authorization": "Bearer test-staff-secret"}
-    settings = client.get("/api/admin/printer", headers=headers).json()
+    settings = client.get("/api/admin/stores/1/printer", headers=headers).json()
     assert settings["host"] == ""
     assert settings["chars_per_line"] == 48
 
@@ -458,26 +416,25 @@ def test_staff_printer_settings_change_receipt_design(client, monkeypatch):
         copies=2,
         cut=False,
     )
-    saved = client.put("/api/admin/printer", headers=headers, json=settings)
+    saved = client.put("/api/admin/stores/1/printer", headers=headers, json=settings)
     assert saved.status_code == 200
-    assert client.get("/api/admin/printer", headers=headers).json() == settings
+    assert client.get("/api/admin/stores/1/printer", headers=headers).json() == settings
 
-    sent, addresses = [], []
-    fake_printer(monkeypatch, sent, addresses)
     created = client.post(
         "/api/orders",
         headers={"Idempotency-Key": str(uuid.uuid4())},
         json={"service_type": "dine_in", "items": [{"product_id": "4", "quantity": 1}]},
     )
 
-    assert created.json()["print_status"] == "printed"
-    assert addresses == [("192.168.1.77", 9101)]
+    assert created.json()["print_status"] == "queued"
+    printer, sent = take_print_jobs(client)
+    assert (printer["host"], printer["port"]) == ("192.168.1.77", 9101)
     data = sent[0]
     single = data[: len(data) // 2]
     assert data == single * 2
     assert "ПИЦЦЕРИЯ".encode("cp866") in single
     assert b"\x1d!\x22" + created.json()["order_number"].encode("ascii") in single
-    assert f"{main.PRODUCT_BY_ID['4'].price:g} с".encode("cp866") in single
+    assert f"{catalog().product_by_id['4'].price:g} с".encode("cp866") in single
     assert "ИТОГО".encode("cp866") not in single
     assert "Приятного аппетита!".encode("cp866") in single
     assert b"\x1dV" not in single
@@ -485,49 +442,50 @@ def test_staff_printer_settings_change_receipt_design(client, monkeypatch):
 
 def test_printer_preview_check_and_test_print_use_unsaved_form(client, monkeypatch):
     headers = {"Authorization": "Bearer test-staff-secret"}
-    settings = client.get("/api/admin/printer", headers=headers).json()
+    settings = client.get("/api/admin/stores/1/printer", headers=headers).json()
     settings["chars_per_line"] = 42
     settings["receipt"]["header"] = "Кухня  №1"
 
-    preview = client.post("/api/admin/printer/preview", headers=headers, json=settings)
+    preview = client.post("/api/admin/stores/1/printer/preview", headers=headers, json=settings)
     assert preview.status_code == 200
     lines = preview.json()["lines"]
     assert preview.json()["chars_per_line"] == 42
     assert lines[0] == {"text": "Кухня №1", "align": "center", "bold": True, "width": 1, "height": 1}
     assert all(len(line["text"]) * line["width"] <= 42 for line in lines)
 
-    not_configured = client.post("/api/admin/printer/test", headers=headers, json=settings)
+    not_configured = client.post("/api/admin/stores/1/printer/test", headers=headers, json=settings)
     assert not_configured.status_code == 503
 
-    sent, addresses = [], []
-    fake_printer(monkeypatch, sent, addresses)
     settings["host"] = "printer.local"
-    checked = client.post("/api/admin/printer/check", headers=headers, json=settings)
-    printed = client.post("/api/admin/printer/test", headers=headers, json=settings)
-
-    assert checked.json()["connected"] is True
+    printed = client.post("/api/admin/stores/1/printer/test", headers=headers, json=settings)
     assert printed.status_code == 200
-    assert addresses == [("printer.local", 9100), ("printer.local", 9100)]
+    status = client.get("/api/admin/stores/1/printer/status", headers=headers).json()
+    assert status["jobs"][0]["status"] == "queued"
+
+    _, sent = take_print_jobs(client)
     assert b"\x1d!\x1112\n" in sent[0]
-    assert client.get("/api/admin/printer", headers=headers).json()["host"] == ""
+    assert client.get("/api/admin/stores/1/printer", headers=headers).json()["host"] == ""
+    status = client.get("/api/admin/stores/1/printer/status", headers=headers).json()
+    assert status["jobs"][0]["status"] == "printed"
+    assert any(agent["online"] and agent["name"] == "Тестовая касса" for agent in status["agents"])
 
 
 def test_printer_settings_are_validated_and_protected(client):
     headers = {"Authorization": "Bearer test-staff-secret"}
-    settings = client.get("/api/admin/printer", headers=headers).json()
+    settings = client.get("/api/admin/stores/1/printer", headers=headers).json()
 
-    assert client.get("/api/admin/printer").status_code == 401
-    assert client.put("/api/admin/printer", json=settings).status_code == 401
+    assert client.get("/api/admin/stores/1/printer").status_code == 401
+    assert client.put("/api/admin/stores/1/printer", json=settings).status_code == 401
     for change in (
         {"host": "bad host; rm"},
         {"port": 0},
         {"encoding": "no-such-codec"},
         {"chars_per_line": 50},
     ):
-        response = client.put("/api/admin/printer", headers=headers, json={**settings, **change})
+        response = client.put("/api/admin/stores/1/printer", headers=headers, json={**settings, **change})
         assert response.status_code == 422, change
     bad_receipt = {**settings, "receipt": {**settings["receipt"], "number_size": 5}}
-    assert client.put("/api/admin/printer", headers=headers, json=bad_receipt).status_code == 422
+    assert client.put("/api/admin/stores/1/printer", headers=headers, json=bad_receipt).status_code == 422
 
 
 def test_admin_report_summarizes_order_quantities_and_exports_csv(client):
@@ -568,8 +526,8 @@ def test_admin_report_summarizes_order_quantities_and_exports_csv(client):
     assert report["products"] == [
         {
             "product_id": "4",
-            "name": main.PRODUCT_BY_ID["4"].name,
-            "unit": main.PRODUCT_BY_ID["4"].unit,
+            "name": catalog().product_by_id["4"].name,
+            "unit": catalog().product_by_id["4"].unit,
             "quantity": 2,
             "amount": 26,
         }
@@ -577,7 +535,7 @@ def test_admin_report_summarizes_order_quantities_and_exports_csv(client):
     assert "mode" not in report
     assert csv_response.status_code == 200
     assert "Количество заказов;1" in csv_response.text
-    assert main.PRODUCT_BY_ID["4"].name in csv_response.text
+    assert catalog().product_by_id["4"].name in csv_response.text
     assert "Режим" not in csv_response.text
 
 
@@ -592,30 +550,15 @@ def test_staff_can_reprint_existing_local_order_without_creating_an_order(client
             "comment": "Без сахара",
         },
     )
-    sent = []
-
-    class FakePrinter:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def sendall(self, data):
-            sent.append(data)
-
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
-    monkeypatch.setattr(
-        main.socket,
-        "create_connection",
-        lambda *_args, **_kwargs: FakePrinter(),
-    )
     printed = client.post(
-        "/api/admin/print",
+        "/api/admin/stores/1/print",
         headers=headers,
         json={"order_ref": created.json()["order_ref"]},
     )
-    orders = client.get("/api/admin/orders", headers=headers).json()
+    assert client.get("/api/admin/stores/1/orders", headers=headers).json()[0]["print_status"] == "queued"
+    _, sent = take_print_jobs(client)
+    orders = client.get("/api/admin/stores/1/orders", headers=headers).json()
 
     assert printed.status_code == 200
     assert orders[0]["print_status"] == "printed"
@@ -642,20 +585,20 @@ def test_pizzas_and_burgers_have_ingredients_editable_by_staff(client):
         name = product["name"].casefold()
         if category_names[product["category_id"]] == "Пиццы" or "бургер" in name:
             assert product["ingredients"], product["name"]
-    assert main.PRODUCT_BY_ID["36"].ingredients == "Томатный соус, моцарелла, пепперони"
-    assert main.PRODUCT_BY_ID["4"].ingredients == ""
+    assert catalog().product_by_id["36"].ingredients == "Томатный соус, моцарелла, пепперони"
+    assert catalog().product_by_id["4"].ingredients == ""
 
     headers = {"Authorization": "Bearer test-staff-secret"}
-    product = main.PRODUCT_BY_ID["36"]
+    product = catalog().product_by_id["36"]
     payload = {
         "name": product.name,
         "category_id": product.category_id,
         "price": "45",
         "available": True,
     }
-    unchanged = client.put("/api/admin/products/36", headers=headers, json=payload)
+    unchanged = client.put("/api/admin/stores/1/products/36", headers=headers, json=payload)
     custom = client.put(
-        "/api/admin/products/36",
+        "/api/admin/stores/1/products/36",
         headers=headers,
         json={**payload, "ingredients": "  Томатный соус, моцарелла, острая пепперони  "},
     )
@@ -664,14 +607,14 @@ def test_pizzas_and_burgers_have_ingredients_editable_by_staff(client):
     assert unchanged.json()["ingredients"] == "Томатный соус, моцарелла, пепперони"
     assert custom.status_code == 200
     main.refresh_catalog()
-    assert main.PRODUCT_BY_ID["36"].ingredients == "Томатный соус, моцарелла, острая пепперони"
+    assert catalog().product_by_id["36"].ingredients == "Томатный соус, моцарелла, острая пепперони"
 
     cleared = client.put(
-        "/api/admin/products/36", headers=headers, json={**payload, "ingredients": ""}
+        "/api/admin/stores/1/products/36", headers=headers, json={**payload, "ingredients": ""}
     )
     assert cleared.status_code == 200
     main.refresh_catalog()
-    assert main.PRODUCT_BY_ID["36"].ingredients == ""
+    assert catalog().product_by_id["36"].ingredients == ""
 
 
 def test_staff_priority_orders_products_in_menu(client):
@@ -679,9 +622,9 @@ def test_staff_priority_orders_products_in_menu(client):
     original_ids = [product["id"] for product in client.get("/api/menu").json()["products"]]
 
     def set_priority(product_id, priority):
-        product = main.PRODUCT_BY_ID[product_id]
+        product = catalog().product_by_id[product_id]
         return client.put(
-            f"/api/admin/products/{product_id}",
+            f"/api/admin/stores/1/products/{product_id}",
             headers=headers,
             json={
                 "name": product.name,
@@ -702,16 +645,16 @@ def test_staff_priority_orders_products_in_menu(client):
     assert menu_ids == ["84", "4", "36", *rest]
     admin_ids = [
         product["id"]
-        for product in client.get("/api/admin/products", headers=headers).json()["products"]
+        for product in client.get("/api/admin/stores/1/products", headers=headers).json()["products"]
     ]
     assert admin_ids == menu_ids
 
     main.refresh_catalog()
-    assert main.PRODUCT_BY_ID["84"].priority == 1
+    assert catalog().product_by_id["84"].priority == 1
 
-    product = main.PRODUCT_BY_ID["84"]
+    product = catalog().product_by_id["84"]
     without_priority_field = client.put(
-        "/api/admin/products/84",
+        "/api/admin/stores/1/products/84",
         headers=headers,
         json={
             "name": product.name,
@@ -722,14 +665,14 @@ def test_staff_priority_orders_products_in_menu(client):
     )
     assert without_priority_field.json()["priority"] == 1
     assert set_priority("84", None).status_code == 200
-    assert main.PRODUCT_BY_ID["84"].priority is None
+    assert catalog().product_by_id["84"].priority is None
     assert set_priority("4", 0).status_code == 422
     assert set_priority("4", 1000).status_code == 422
 
 
 def test_orders_above_1000_somoni_must_go_to_cash_desk(client):
     assert client.get("/api/menu").json()["max_order_total"] == 1000
-    assert main.PRODUCT_BY_ID["108"].price == 100
+    assert catalog().product_by_id["108"].price == 100
 
     def order(items):
         return client.post(
@@ -754,7 +697,7 @@ def test_orders_above_1000_somoni_must_go_to_cash_desk(client):
     assert "через кассу" in over_limit.json()["detail"]
     assert weighted_over_limit.status_code == 422
     headers = {"Authorization": "Bearer test-staff-secret"}
-    assert len(client.get("/api/admin/orders", headers=headers).json()) == 1
+    assert len(client.get("/api/admin/stores/1/orders", headers=headers).json()) == 1
 
 
 def test_customer_must_choose_dine_in_or_takeaway(client, monkeypatch):
@@ -774,11 +717,10 @@ def test_customer_must_choose_dine_in_or_takeaway(client, monkeypatch):
     assert "с собой" in missing.json()["detail"]
     assert invalid.status_code == 422
 
-    sent = []
-    fake_printer(monkeypatch, sent)
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
     takeaway = order("takeaway")
     dine_in = order("dine_in")
+    _, sent = take_print_jobs(client)
 
     assert takeaway.status_code == 201
     assert takeaway.json()["service_type"] == "takeaway"
@@ -786,21 +728,19 @@ def test_customer_must_choose_dine_in_or_takeaway(client, monkeypatch):
     assert b"\x1d!\x11" + "С СОБОЙ".encode("cp866") in sent[0]
     assert b"\x1d!\x11" + "В ЗАЛЕ".encode("cp866") in sent[1]
 
-    orders = client.get("/api/admin/orders", headers=headers).json()
+    orders = client.get("/api/admin/stores/1/orders", headers=headers).json()
     assert [entry["service_type"] for entry in orders] == ["dine_in", "takeaway"]
     exported = client.get("/api/admin/report.csv", headers=headers).text
     assert "В зале / с собой" in exported
     assert ";С собой;" in exported and ";В зале;" in exported
 
-    settings = client.get("/api/admin/printer", headers=headers).json()
+    settings = client.get("/api/admin/stores/1/printer", headers=headers).json()
     settings["receipt"]["show_service_type"] = False
-    preview = client.post("/api/admin/printer/preview", headers=headers, json=settings)
+    preview = client.post("/api/admin/stores/1/printer/preview", headers=headers, json=settings)
     assert all(line["text"] != "С СОБОЙ" for line in preview.json()["lines"])
 
 
 def test_tajik_letters_in_comment_print_as_closest_russian(client, monkeypatch):
-    sent = []
-    fake_printer(monkeypatch, sent)
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
     response = client.post(
         "/api/orders",
@@ -814,15 +754,14 @@ def test_tajik_letters_in_comment_print_as_closest_russian(client, monkeypatch):
 
     assert response.status_code == 201
     assert response.json()["comment"] == "Қаҳва ҷудо, ғӯшт нагӣ"
+    _, sent = take_print_jobs(client)
     assert "Комментарий: Кахва чудо, гушт наги".encode("cp866") in sent[0]
     assert b"?" not in sent[0]
 
 
 def test_order_numbers_run_from_1_to_50_and_restart(client, monkeypatch):
-    sent = []
-    fake_printer(monkeypatch, sent)
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
-    numbers, refs = [], []
+    numbers, refs, sent = [], [], []
     for _ in range(52):
         response = client.post(
             "/api/orders",
@@ -832,6 +771,7 @@ def test_order_numbers_run_from_1_to_50_and_restart(client, monkeypatch):
         assert response.status_code == 201
         numbers.append(response.json()["order_number"])
         refs.append(response.json()["order_ref"])
+        sent.extend(take_print_jobs(client)[1])
 
     assert numbers == [str(number) for number in range(1, 51)] + ["1", "2"]
     assert len(set(refs)) == 52
@@ -840,9 +780,9 @@ def test_order_numbers_run_from_1_to_50_and_restart(client, monkeypatch):
     assert b"\x1d!\x111\n" in sent[50]
 
     headers = {"Authorization": "Bearer test-staff-secret"}
-    reprinted = client.post("/api/admin/print", headers=headers, json={"order_ref": refs[0]})
+    reprinted = client.post("/api/admin/stores/1/print", headers=headers, json={"order_ref": refs[0]})
     assert reprinted.json()["order_number"] == "1"
     assert reprinted.json()["order_ref"] == "P-00001"
     exported = client.get("/api/admin/report.csv", headers=headers).text
-    assert "\n1;P-00051;" in exported.replace("\r\n", "\n")
-    assert "\n50;P-00050;" in exported.replace("\r\n", "\n")
+    assert ";1;P-00051;" in exported
+    assert ";50;P-00050;" in exported

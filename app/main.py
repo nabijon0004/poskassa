@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import codecs
-import csv
 import hashlib
-import hmac
-import io
 import json
 import logging
 import os
 import re
-import socket
 import sqlite3
 import textwrap
 import uuid
 from contextlib import asynccontextmanager, closing
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -23,8 +20,8 @@ from unicodedata import normalize
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -34,12 +31,13 @@ STATIC_DIR = ROOT / "static"
 CATALOG_PATH = ROOT / "tovar.xlsx"
 LOGO_PATH = ROOT / "logo.jpg"
 DB_PATH = Path(os.getenv("KIOSK_DB_PATH", str(ROOT / "data" / "kiosk.sqlite3")))
-ADMIN_TOKEN = os.getenv("KIOSK_ADMIN_TOKEN", "")
 CURRENCY = os.getenv("KIOSK_CURRENCY", "с")
 # Larger orders must be placed at the cash desk.
 MAX_ORDER_TOTAL = Decimal(os.getenv("KIOSK_MAX_ORDER_TOTAL", "1000"))
 # Customer-facing order numbers run 1..ORDER_NUMBER_MAX and then start again from 1.
 ORDER_NUMBER_MAX = int(os.getenv("KIOSK_ORDER_NUMBER_MAX", "50"))
+# Title printed at the top of customer receipts from the cash register.
+RECEIPT_TITLE = os.getenv("KIOSK_RECEIPT_TITLE", "PAPRIKA")
 PRINTER_HOST = os.getenv("KIOSK_PRINTER_HOST", "").strip()
 PRINTER_PORT = int(os.getenv("KIOSK_PRINTER_PORT", "9100"))
 PRINTER_TIMEOUT = float(os.getenv("KIOSK_PRINTER_TIMEOUT", "3"))
@@ -47,6 +45,9 @@ PRINTER_CODEPAGE = int(os.getenv("KIOSK_PRINTER_CODEPAGE", "17"))
 PRINTER_ENCODING = os.getenv("KIOSK_PRINTER_ENCODING", "cp866")
 IMAGE_UPLOAD_DIR = STATIC_DIR / "images" / "uploads"
 MAX_PRODUCT_IMAGE_SIZE = 5 * 1024 * 1024
+
+# Kiosks, registers and queue screens send the key of their device (see app/stores.py).
+DeviceKey = Annotated[str | None, Header(alias="X-Device-Key")]
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("paprika-kiosk")
@@ -189,6 +190,13 @@ class PrintInput(BaseModel):
 
 
 SERVICE_TYPE_LABELS = {"dine_in": "В зале", "takeaway": "С собой"}
+PAYMENT_METHOD_LABELS = {"cash": "Наличные", "card": "Карта"}
+PAYMENT_STATUS_LABELS = {
+    "unpaid": "не оплачено",
+    "paid": "оплачено",
+    "refunded": "возврат",
+    "cancelled": "отменён",
+}
 
 
 class OrderInput(BaseModel):
@@ -205,12 +213,29 @@ class OrderInput(BaseModel):
         return "".join(" " if ord(char) < 32 or ord(char) == 127 else char for char in value).strip()
 
 
-CATEGORIES: list[Category] = []
-PRODUCTS: list[Product] = []
-PRODUCT_BY_ID: dict[str, Product] = {}
-VARIANT_BY_ID: dict[str, dict[str, Modifier]] = {}
-MODIFIER_BY_ID: dict[str, dict[str, Modifier]] = {}
+@dataclass
+class Catalog:
+    """The menu of one store: the shared menu from tovar.xlsx plus the store's changes."""
+
+    categories: list[Category]
+    products: list[Product]
+
+    def __post_init__(self) -> None:
+        self.product_by_id = {product.id: product for product in self.products}
+        self.variant_by_id = {
+            product.id: {variant.id: variant for variant in product.variants} for product in self.products
+        }
+        self.modifier_by_id = {
+            product.id: {modifier.id: modifier for modifier in product.modifiers} for product in self.products
+        }
+        self.category_by_id = {category.id: category for category in self.categories}
+
+
+# The shared menu read from tovar.xlsx, and the per-store menus built from it.
+BASE_CATEGORIES: list[Category] = []
+BASE_PRODUCTS: list[Product] = []
 CATALOG_ERROR: str | None = None
+_STORE_CATALOGS: dict[int, Catalog] = {}
 
 WEIGHTED_PRICE_PER_KG = Decimal("95")
 WEIGHTED_MIN_GRAMS = 200
@@ -547,32 +572,52 @@ def load_catalog(path: Path = CATALOG_PATH) -> tuple[list[Category], list[Produc
 
 
 def refresh_catalog() -> None:
-    global CATEGORIES, PRODUCTS, PRODUCT_BY_ID, VARIANT_BY_ID, MODIFIER_BY_ID, CATALOG_ERROR
+    """Reload the shared menu from tovar.xlsx; store menus are rebuilt on next use."""
+    global BASE_CATEGORIES, BASE_PRODUCTS, CATALOG_ERROR
     try:
         categories, products = load_catalog()
-        with closing(connect_db()) as connection:
-            saved_products = connection.execute(
-                "SELECT * FROM product_settings"
-            ).fetchall()
     except (OSError, ValueError) as exc:
-        CATEGORIES = []
-        PRODUCTS = []
-        PRODUCT_BY_ID = {}
-        VARIANT_BY_ID = {}
-        MODIFIER_BY_ID = {}
+        BASE_CATEGORIES = []
+        BASE_PRODUCTS = []
         CATALOG_ERROR = str(exc)
         logger.error("Could not load product catalog: %s", exc)
-        return
+    else:
+        BASE_CATEGORIES = categories
+        BASE_PRODUCTS = products
+        CATALOG_ERROR = None
+    _STORE_CATALOGS.clear()
+
+
+def invalidate_catalog(store_id: int) -> None:
+    _STORE_CATALOGS.pop(store_id, None)
+
+
+def catalog_for(store_id: int) -> Catalog:
+    """The store's menu: the shared menu with the store's saved product changes applied."""
+    cached = _STORE_CATALOGS.get(store_id)
+    if cached is not None:
+        return cached
+    if CATALOG_ERROR or not BASE_PRODUCTS:
+        raise HTTPException(
+            status_code=503,
+            detail=CATALOG_ERROR or "Каталог товаров из файла tovar.xlsx недоступен.",
+        )
+    categories = [category.model_copy() for category in BASE_CATEGORIES]
+    products = [product.model_copy(deep=True) for product in BASE_PRODUCTS]
+    with closing(connect_db()) as connection:
+        saved_products = connection.execute(
+            "SELECT * FROM product_settings WHERE store_id = ?", (store_id,)
+        ).fetchall()
 
     product_by_id = {product.id: product for product in products}
-    category_ids = {category.id for category in categories}
+    category_names = {category.id: category.name for category in categories}
     ingredient_overrides = {
         saved["product_id"]: saved["ingredients"]
         for saved in saved_products
         if saved["ingredients"] is not None
     }
     for saved in saved_products:
-        if saved["category_id"] not in category_ids:
+        if saved["category_id"] not in category_names:
             logger.warning(
                 "Ignoring saved product %s with missing category %s",
                 saved["product_id"],
@@ -584,11 +629,7 @@ def refresh_catalog() -> None:
                 id=saved["product_id"],
                 name=saved["name"],
                 category_id=saved["category_id"],
-                description=next(
-                    category.name
-                    for category in categories
-                    if category.id == saved["category_id"]
-                ),
+                description=category_names[saved["category_id"]],
                 price=float(saved["price"]),
                 available=bool(saved["available"]),
                 image=saved["image"],
@@ -603,9 +644,7 @@ def refresh_catalog() -> None:
             continue
         product.name = saved["name"]
         product.category_id = saved["category_id"]
-        product.description = next(
-            category.name for category in categories if category.id == saved["category_id"]
-        )
+        product.description = category_names[saved["category_id"]]
         product.price = float(saved["price"])
         product.available = bool(saved["available"])
         product.image = saved["image"]
@@ -625,22 +664,12 @@ def refresh_catalog() -> None:
 
     # Stable sort: equal priorities keep their workbook order.
     products.sort(key=lambda product: (product.priority is None, product.priority or 0))
-
-    CATEGORIES = categories
-    PRODUCTS = products
-    PRODUCT_BY_ID = {product.id: product for product in products}
-    VARIANT_BY_ID = {
-        product.id: {variant.id: variant for variant in product.variants}
-        for product in products
-    }
-    MODIFIER_BY_ID = {
-        product.id: {modifier.id: modifier for modifier in product.modifiers}
-        for product in products
-    }
-    CATALOG_ERROR = None
+    catalog = Catalog(categories, products)
+    _STORE_CATALOGS[store_id] = catalog
+    return catalog
 
 
-def save_product_setting(product: Product, *, is_custom: bool) -> None:
+def save_product_setting(store_id: int, product: Product, *, is_custom: bool) -> None:
     # NULL keeps following the default composition for the (possibly renamed) product.
     ingredients = product.ingredients.strip()
     ingredients_override = (
@@ -650,10 +679,10 @@ def save_product_setting(product: Product, *, is_custom: bool) -> None:
         connection.execute(
             """
             INSERT INTO product_settings
-                (product_id, name, category_id, price, available, image, unit, is_custom,
+                (store_id, product_id, name, category_id, price, available, image, unit, is_custom,
                  ingredients, priority)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(product_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(store_id, product_id) DO UPDATE SET
                 name = excluded.name,
                 category_id = excluded.category_id,
                 price = excluded.price,
@@ -665,6 +694,7 @@ def save_product_setting(product: Product, *, is_custom: bool) -> None:
                 priority = excluded.priority
             """,
             (
+                store_id,
                 product.id,
                 product.name,
                 product.category_id,
@@ -678,6 +708,7 @@ def save_product_setting(product: Product, *, is_custom: bool) -> None:
             ),
         )
         connection.commit()
+    invalidate_catalog(store_id)
 
 
 class PrinterError(Exception):
@@ -694,11 +725,15 @@ def default_printer_settings() -> PrinterSettings:
     )
 
 
-def load_printer_settings() -> PrinterSettings:
-    """Settings saved from the staff panel, or the environment defaults."""
+def printer_settings_key(store_id: int) -> str:
+    return f"printer:{store_id}"
+
+
+def load_printer_settings(store_id: int) -> PrinterSettings:
+    """The store's settings saved in the admin panel, or the environment defaults."""
     with closing(connect_db()) as connection:
         row = connection.execute(
-            "SELECT value FROM app_settings WHERE key = 'printer'"
+            "SELECT value FROM app_settings WHERE key = ?", (printer_settings_key(store_id),)
         ).fetchone()
     if row is None:
         return default_printer_settings()
@@ -709,14 +744,14 @@ def load_printer_settings() -> PrinterSettings:
         return default_printer_settings()
 
 
-def save_printer_settings(settings: PrinterSettings) -> None:
+def save_printer_settings(store_id: int, settings: PrinterSettings) -> None:
     with closing(connect_db()) as connection:
         connection.execute(
             """
-            INSERT INTO app_settings (key, value) VALUES ('printer', ?)
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """,
-            (settings.model_dump_json(),),
+            (printer_settings_key(store_id), settings.model_dump_json()),
         )
         connection.commit()
 
@@ -742,6 +777,91 @@ def _receipt_line(
     height: int = 1,
 ) -> dict[str, Any]:
     return {"text": text, "align": align, "bold": bold, "width": width, "height": height}
+
+
+def receipt_item_lines(
+    items: list[dict[str, Any]], columns: int, *, show_prices: bool, height: int = 1
+) -> list[dict[str, Any]]:
+    """Item rows shared by the kitchen and customer receipts."""
+    lines: list[dict[str, Any]] = []
+    for item in items:
+        title = f"{item['quantity']} x {item['name']}"
+        price = (
+            format_receipt_money(item["unit_price"] * item["quantity"]) if show_prices else ""
+        )
+        name_width = columns - len(price) - 1 if price else columns
+        name_lines = textwrap.wrap(
+            title, name_width, subsequent_indent="    ", break_long_words=True
+        ) or [title]
+        first = f"{name_lines[0]:<{name_width}} {price}" if price else name_lines[0]
+        lines.append(_receipt_line(first, bold=True, height=height))
+        for extra in name_lines[1:]:
+            lines.append(_receipt_line(extra, bold=True, height=height))
+        details = []
+        if item.get("weight_grams"):
+            if item.get("portion_kind") == "price":
+                details.append(
+                    f"на {format_receipt_money(item['portion_amount'])}"
+                    f" ≈ {format_receipt_grams(item['weight_grams'])}"
+                )
+            else:
+                details.append(format_receipt_grams(item["weight_grams"]))
+        if item.get("variant"):
+            details.append(item["variant"]["name"])
+        details.extend(f"+ {modifier['name']}" for modifier in item.get("modifiers", []))
+        for detail in details:
+            for chunk in textwrap.wrap(detail, columns - 4, break_long_words=True):
+                lines.append(_receipt_line("    " + chunk, height=height))
+    return lines
+
+
+def _amount_line(label: str, amount: float, columns: int, *, bold: bool = False) -> dict[str, Any]:
+    value = format_receipt_money(amount)
+    return _receipt_line(f"{label:<{columns - len(value) - 1}} {value}", bold=bold)
+
+
+def build_customer_receipt(
+    order: dict[str, Any], settings: PrinterSettings, *, cashier_name: str = ""
+) -> list[dict[str, Any]]:
+    """Non-fiscal sales receipt for the customer, printed by the cash register."""
+    columns = settings.chars_per_line
+    separator = _receipt_line("-" * columns)
+    created = datetime.fromisoformat(order.get("paid_at") or order["created_at"]).astimezone()
+    lines = [
+        _receipt_line(RECEIPT_TITLE[: columns // 2], align="center", bold=True, width=2, height=2),
+        _receipt_line("ТОВАРНЫЙ ЧЕК", align="center", bold=True),
+        _receipt_line(f"Заказ № {order['order_number']}", align="center", bold=True, width=2, height=2),
+        _receipt_line(created.strftime("%d.%m.%Y %H:%M"), align="center"),
+    ]
+    if cashier_name:
+        lines.append(_receipt_line(f"Кассир: {cashier_name}"[:columns], align="center"))
+    service_label = SERVICE_TYPE_LABELS.get(order.get("service_type") or "")
+    if service_label:
+        lines.append(_receipt_line(service_label, align="center"))
+    lines.append(separator)
+    lines.extend(receipt_item_lines(order["items"], columns, show_prices=True))
+    lines.append(separator)
+    discount = order.get("discount") or 0
+    if discount:
+        lines.append(_amount_line("Подытог", order.get("subtotal") or order["total"], columns))
+        lines.append(_amount_line("Скидка", -discount, columns))
+    lines.append(_amount_line("ИТОГО", order["total"], columns, bold=True))
+    method = order.get("payment_method")
+    if method == "cash":
+        lines.append(_amount_line("Наличные", order.get("amount_received") or order["total"], columns))
+        lines.append(_amount_line("Сдача", order.get("change_due") or 0, columns))
+    elif method == "card":
+        lines.append(_amount_line("Оплата картой", order["total"], columns))
+    lines.append(separator)
+    lines.append(_receipt_line("Спасибо за покупку!", align="center", bold=True))
+    lines.append(_receipt_line("Нефискальный документ", align="center"))
+    return lines
+
+
+def single_copy(settings: PrinterSettings) -> PrinterSettings:
+    return settings.model_copy(
+        update={"receipt": settings.receipt.model_copy(update={"copies": 1})}
+    )
 
 
 def build_receipt(order: dict[str, Any], settings: PrinterSettings) -> list[dict[str, Any]]:
@@ -781,38 +901,11 @@ def build_receipt(order: dict[str, Any], settings: PrinterSettings) -> list[dict
     item_height = 2 if receipt.items_large else 1
     if receipt.show_items:
         lines.append(separator)
-        for item in order["items"]:
-            title = f"{item['quantity']} x {item['name']}"
-            price = (
-                format_receipt_money(item["unit_price"] * item["quantity"])
-                if receipt.show_prices
-                else ""
+        lines.extend(
+            receipt_item_lines(
+                order["items"], columns, show_prices=receipt.show_prices, height=item_height
             )
-            name_width = columns - len(price) - 1 if price else columns
-            name_lines = textwrap.wrap(
-                title, name_width, subsequent_indent="    ", break_long_words=True
-            ) or [title]
-            first = (
-                f"{name_lines[0]:<{name_width}} {price}" if price else name_lines[0]
-            )
-            lines.append(_receipt_line(first, bold=True, height=item_height))
-            for extra in name_lines[1:]:
-                lines.append(_receipt_line(extra, bold=True, height=item_height))
-            details = []
-            if item.get("weight_grams"):
-                if item.get("portion_kind") == "price":
-                    details.append(
-                        f"на {format_receipt_money(item['portion_amount'])}"
-                        f" ≈ {format_receipt_grams(item['weight_grams'])}"
-                    )
-                else:
-                    details.append(format_receipt_grams(item["weight_grams"]))
-            if item.get("variant"):
-                details.append(item["variant"]["name"])
-            details.extend(f"+ {modifier['name']}" for modifier in item.get("modifiers", []))
-            for detail in details:
-                for chunk in textwrap.wrap(detail, columns - 4, break_long_words=True):
-                    lines.append(_receipt_line("    " + chunk, height=item_height))
+        )
         lines.append(separator)
 
     if receipt.show_total:
@@ -856,44 +949,53 @@ def render_escpos(lines: list[dict[str, Any]], settings: PrinterSettings) -> byt
 
 
 class OrderPrinter:
-    @staticmethod
-    def health(settings: PrinterSettings | None = None) -> dict[str, Any]:
-        settings = settings or load_printer_settings()
-        if not settings.host:
-            return {"configured": False, "connected": False, "message": "Принтер не настроен."}
-        try:
-            with socket.create_connection(
-                (settings.host, settings.port), timeout=settings.timeout
-            ):
-                return {
-                    "configured": True,
-                    "connected": True,
-                    "message": f"Принтер {settings.host}:{settings.port} на связи.",
-                }
-        except OSError:
-            return {
-                "configured": True,
-                "connected": False,
-                "message": f"Нет связи с принтером {settings.host}:{settings.port}.",
-            }
+    """Puts documents into the store's print queue.
+
+    The cloud server cannot reach printers in the stores' local networks: the cash
+    register program in the store takes the jobs and sends them to the printer.
+    """
 
     @staticmethod
     def print_order(
-        order: dict[str, Any], settings: PrinterSettings | None = None
+        order: dict[str, Any], store_id: int, settings: PrinterSettings | None = None
     ) -> None:
-        settings = settings or load_printer_settings()
-        if not settings.host:
-            raise PrinterError("Принтер не настроен.")
+        settings = settings or load_printer_settings(store_id)
         if not re.fullmatch(r"[A-Z0-9-]{1,40}", order["order_number"]):
             raise PrinterError("Недопустимый формат номера заказа.")
-        data = render_escpos(build_receipt(order, settings), settings)
-        try:
-            with socket.create_connection(
-                (settings.host, settings.port), timeout=settings.timeout
-            ) as printer:
-                printer.sendall(data)
-        except OSError as exc:
-            raise PrinterError("Не удалось передать чек на принтер.") from exc
+        OrderPrinter.send(
+            store_id,
+            render_escpos(build_receipt(order, settings), settings),
+            settings,
+            kind="kitchen",
+            title=f"Заказ № {order['order_number']}",
+            order_ref=order.get("order_ref"),
+        )
+
+    @staticmethod
+    def print_lines(
+        lines: list[dict[str, Any]],
+        store_id: int,
+        *,
+        title: str,
+        settings: PrinterSettings | None = None,
+    ) -> None:
+        """Print one copy of a document other than the kitchen ticket."""
+        settings = single_copy(settings or load_printer_settings(store_id))
+        OrderPrinter.send(store_id, render_escpos(lines, settings), settings, kind="document", title=title)
+
+    @staticmethod
+    def send(
+        store_id: int,
+        data: bytes,
+        settings: PrinterSettings,
+        *,
+        kind: str,
+        title: str,
+        order_ref: str | None = None,
+    ) -> None:
+        if not settings.host:
+            raise PrinterError("Принтер не настроен.")
+        printing.enqueue_job(store_id, data, kind=kind, title=title, order_ref=order_ref)
 
 
 def sample_order() -> dict[str, Any]:
@@ -930,6 +1032,16 @@ def initialize_db() -> None:
     with closing(connect_db()) as connection:
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        # Data created before stores existed belongs to the first store.
+        default_store_id = stores.initialize_store_tables(connection)
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 idempotency_key TEXT NOT NULL UNIQUE,
@@ -950,45 +1062,126 @@ def initialize_db() -> None:
             connection.execute("ALTER TABLE orders ADD COLUMN service_type TEXT NOT NULL DEFAULT ''")
         if "comment" not in columns:
             connection.execute("ALTER TABLE orders ADD COLUMN comment TEXT NOT NULL DEFAULT ''")
-        connection.execute("UPDATE orders SET mode = 'local' WHERE mode != 'local'")
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS product_settings (
-                product_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                category_id TEXT NOT NULL,
-                price TEXT NOT NULL,
-                available INTEGER NOT NULL,
-                image TEXT NOT NULL,
-                unit TEXT NOT NULL,
-                is_custom INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-        product_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(product_settings)")
+        # Payment data filled in by the cash register (kiosk orders start unpaid).
+        payment_columns = {
+            "source": "TEXT NOT NULL DEFAULT 'kiosk'",
+            "payment_status": "TEXT NOT NULL DEFAULT 'unpaid'",
+            "payment_method": "TEXT NOT NULL DEFAULT ''",
+            "subtotal": "REAL",
+            "discount": "REAL NOT NULL DEFAULT 0",
+            "amount_received": "REAL",
+            "change_due": "REAL",
+            "paid_at": "TEXT",
+            "shift_id": "INTEGER",
+            "cashier_id": "INTEGER",
+            "refunded_at": "TEXT",
+            "refund_shift_id": "INTEGER",
+            "cancelled_at": "TEXT",
+            # Queue screen: 'preparing' -> 'ready' (set by the cashier); '' = not for the kitchen.
+            "kitchen_status": "TEXT NOT NULL DEFAULT ''",
+            "ready_at": "TEXT",
+            # Store, the kiosk or register that created the order, and the register that took payment.
+            "store_id": f"INTEGER NOT NULL DEFAULT {default_store_id}",
+            "device_id": "INTEGER",
+            "register_id": "INTEGER",
+            # Per-store order counter; the customer number is derived from it.
+            "store_seq": "INTEGER",
+            # Number printed by a register that sold the order without internet (О12).
+            "offline_number": "TEXT",
         }
-        if "ingredients" not in product_columns:
-            connection.execute("ALTER TABLE product_settings ADD COLUMN ingredients TEXT")
-        if "priority" not in product_columns:
-            connection.execute("ALTER TABLE product_settings ADD COLUMN priority INTEGER")
+        for name, definition in payment_columns.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
+        connection.execute("UPDATE orders SET mode = 'local' WHERE mode != 'local'")
+        connection.execute("UPDATE orders SET store_seq = id WHERE store_seq IS NULL")
         connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS app_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
+            "CREATE UNIQUE INDEX IF NOT EXISTS orders_store_seq ON orders (store_id, store_seq)"
         )
+        connection.execute("CREATE INDEX IF NOT EXISTS orders_store_created ON orders (store_id, created_at)")
+        migrate_product_settings(connection, default_store_id)
+        if connection.execute(
+            "SELECT 1 FROM app_settings WHERE key = ?", (printer_settings_key(default_store_id),)
+        ).fetchone() is None:
+            connection.execute(
+                "UPDATE app_settings SET key = ? WHERE key = 'printer'",
+                (printer_settings_key(default_store_id),),
+            )
+        drop_cloud_sync_tables(connection)
+
+        from app.admin import initialize_admin_tables
+        from app.pos import initialize_pos_tables
+
+        initialize_pos_tables(connection, default_store_id)
+        printing.initialize_print_tables(connection)
+        initialize_admin_tables(connection)
         connection.commit()
 
 
-def resolve_order_items(payload: OrderInput) -> tuple[list[dict[str, Any]], float]:
+def migrate_product_settings(connection: sqlite3.Connection, default_store_id: int) -> None:
+    """Product changes are kept per store: (store_id, product_id)."""
+    create = """
+        CREATE TABLE IF NOT EXISTS {name} (
+            store_id INTEGER NOT NULL,
+            product_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            price TEXT NOT NULL,
+            available INTEGER NOT NULL,
+            image TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            is_custom INTEGER NOT NULL DEFAULT 0,
+            ingredients TEXT,
+            priority INTEGER,
+            PRIMARY KEY (store_id, product_id)
+        )
+    """
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(product_settings)")}
+    if not columns:
+        connection.execute(create.format(name="product_settings"))
+        return
+    if "store_id" in columns:
+        return
+    for name in ("ingredients", "priority"):
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE product_settings ADD COLUMN {name} {'TEXT' if name == 'ingredients' else 'INTEGER'}"
+            )
+    connection.execute(create.format(name="product_settings_by_store"))
+    connection.execute(
+        """
+        INSERT INTO product_settings_by_store
+            (store_id, product_id, name, category_id, price, available, image, unit, is_custom,
+             ingredients, priority)
+        SELECT ?, product_id, name, category_id, price, available, image, unit, is_custom,
+               ingredients, priority
+        FROM product_settings
+        """,
+        (default_store_id,),
+    )
+    connection.execute("DROP TABLE product_settings")
+    connection.execute("ALTER TABLE product_settings_by_store RENAME TO product_settings")
+
+
+def drop_cloud_sync_tables(connection: sqlite3.Connection) -> None:
+    """The offline sync to a central server was replaced by one shared server."""
+    for table in ("orders", "shifts"):
+        for event in ("insert", "update"):
+            connection.execute(f"DROP TRIGGER IF EXISTS sync_{table}_{event}")
+    connection.execute("DROP TABLE IF EXISTS sync_outbox")
+    connection.execute("DROP TABLE IF EXISTS synced_records")
+    connection.execute("DELETE FROM app_settings WHERE key = 'sync_backfilled'")
+
+
+def resolve_order_items(
+    payload: Any, catalog: Catalog, *, enforce_total_limit: bool = True, require_available: bool = True
+) -> tuple[list[dict[str, Any]], float]:
+    """Price order lines with the store's menu; the kiosk limit does not apply at the register."""
     normalized: list[dict[str, Any]] = []
     total = Decimal("0")
     for line in payload.items:
-        product = PRODUCT_BY_ID.get(line.product_id)
-        if product is None or not product.available:
+        product = catalog.product_by_id.get(line.product_id)
+        # A sale made offline is recorded even if the product was hidden meanwhile.
+        if product is None or (require_available and not product.available):
             raise HTTPException(status_code=409, detail="Товар недоступен.")
 
         portion: dict[str, Any] | None = None
@@ -1031,7 +1224,7 @@ def resolve_order_items(payload: OrderInput) -> tuple[list[dict[str, Any]], floa
                 raise HTTPException(
                     status_code=422, detail=f"Выберите вариант товара «{product.name}»."
                 )
-            variant = VARIANT_BY_ID[product.id].get(line.variant_id)
+            variant = catalog.variant_by_id[product.id].get(line.variant_id)
             if variant is None:
                 raise HTTPException(status_code=422, detail="Недопустимый вариант товара.")
         elif line.variant_id is not None:
@@ -1043,7 +1236,7 @@ def resolve_order_items(payload: OrderInput) -> tuple[list[dict[str, Any]], floa
             if modifier_id in seen_modifiers:
                 raise HTTPException(status_code=422, detail="Добавка указана повторно.")
             seen_modifiers.add(modifier_id)
-            modifier = MODIFIER_BY_ID[product.id].get(modifier_id)
+            modifier = catalog.modifier_by_id[product.id].get(modifier_id)
             if modifier is None:
                 raise HTTPException(status_code=422, detail="Недопустимая добавка.")
             selected_modifiers.append(modifier)
@@ -1060,7 +1253,7 @@ def resolve_order_items(payload: OrderInput) -> tuple[list[dict[str, Any]], floa
             start=Decimal("0"),
         )
         total += unit_price * line.quantity
-        if total > MAX_ORDER_TOTAL:
+        if enforce_total_limit and total > MAX_ORDER_TOTAL:
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -1093,39 +1286,104 @@ def resolve_order_items(payload: OrderInput) -> tuple[list[dict[str, Any]], floa
     return normalized, float(total)
 
 
-def display_order_number(order_id: int) -> str:
-    return str((order_id - 1) % ORDER_NUMBER_MAX + 1)
+def display_order_number(store_seq: int) -> str:
+    """Customer number: each store counts 1..ORDER_NUMBER_MAX and then starts again."""
+    return str((store_seq - 1) % ORDER_NUMBER_MAX + 1)
 
 
 def public_order(row: sqlite3.Row) -> dict[str, Any]:
     return {
-        "order_number": display_order_number(row["id"]),
+        "order_number": display_order_number(row["store_seq"]),
+        "store_id": row["store_id"],
         "order_ref": row["order_number"],
         "total": row["total"],
         "items": json.loads(row["items_json"]),
         "comment": row["comment"],
         "service_type": row["service_type"] or None,
         "created_at": row["created_at"],
-        "payment_status": "unpaid",
+        "source": row["source"],
+        "payment_status": row["payment_status"],
+        "payment_method": row["payment_method"] or None,
+        "subtotal": row["subtotal"] if row["subtotal"] is not None else row["total"],
+        "discount": row["discount"],
+        "amount_received": row["amount_received"],
+        "change_due": row["change_due"],
+        "paid_at": row["paid_at"],
         "print_status": row["print_status"],
+        "kitchen_status": row["kitchen_status"] or None,
+        "ready_at": row["ready_at"],
+        "offline_number": row["offline_number"],
     }
 
 
-def require_admin(authorization: str | None) -> None:
-    if not ADMIN_TOKEN:
-        raise HTTPException(
-            status_code=503, detail="Администрирование отключено: задайте KIOSK_ADMIN_TOKEN."
-        )
-    expected = f"Bearer {ADMIN_TOKEN}"
-    if authorization is None or not hmac.compare_digest(authorization, expected):
-        raise HTTPException(status_code=401, detail="Требуется авторизация сотрудника.")
+def store_order(
+    idempotency_key: str, request_hash: str, fields: dict[str, Any]
+) -> tuple[sqlite3.Row, bool]:
+    """Insert an order once per idempotency key; returns (row, created)."""
+    with closing(connect_db()) as connection:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM orders WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+            if existing is not None:
+                if existing["request_hash"] != request_hash:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Ключ уже использован для другого состава заказа.",
+                    )
+                connection.commit()
+                return existing, False
+            store_seq = connection.execute(
+                "SELECT COALESCE(MAX(store_seq), 0) + 1 FROM orders WHERE store_id = ?",
+                (fields["store_id"],),
+            ).fetchone()[0]
+            names = ["idempotency_key", "request_hash", "order_number", "mode", "store_seq", *fields]
+            values = [idempotency_key, request_hash, "pending", "local", store_seq, *fields.values()]
+            cursor = connection.execute(
+                f"INSERT INTO orders ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
+                values,
+            )
+            connection.execute(
+                "UPDATE orders SET order_number = ? WHERE id = ?",
+                (f"P-{cursor.lastrowid:05d}", cursor.lastrowid),
+            )
+            connection.commit()
+        except HTTPException:
+            connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            connection.rollback()
+            logger.exception("Could not persist order")
+            raise HTTPException(status_code=500, detail="Не удалось сохранить заказ.") from exc
+        row = connection.execute(
+            "SELECT * FROM orders WHERE idempotency_key = ?", (idempotency_key,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=500, detail="Не удалось получить созданный заказ.")
+    return row, True
+
+
+def parse_idempotency_key(idempotency_key: str | None) -> str:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Отсутствует ключ запроса.")
+    try:
+        return str(uuid.UUID(idempotency_key))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Некорректный ключ запроса.") from exc
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     initialize_db()
     refresh_catalog()
+    from app import admin, queue_screen
+
+    admin.create_owner_from_environment()
+    queue_server = queue_screen.start_server()
     yield
+    if queue_server is not None:
+        await queue_screen.stop_server(*queue_server)
 
 
 app = FastAPI(
@@ -1136,9 +1394,39 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def revalidate_app_files(request: Request, call_next):
+    """Make browsers check pages, scripts and styles on every load so updates show at once."""
+    response = await call_next(request)
+    path = request.url.path
+    if path in {"/", "/pos", "/admin"} or path.endswith((".html", ".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/", include_in_schema=False)
 def kiosk_home() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_home() -> FileResponse:
+    return FileResponse(STATIC_DIR / "admin" / "index.html")
+
+
+@app.get("/pos", include_in_schema=False)
+def pos_home() -> FileResponse:
+    return FileResponse(STATIC_DIR / "pos" / "index.html")
+
+
+@app.get("/pos-sw.js", include_in_schema=False)
+def pos_service_worker() -> FileResponse:
+    # Keeps the register page working without internet (static/pos/sw.js).
+    return FileResponse(
+        STATIC_DIR / "pos" / "sw.js",
+        media_type="text/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/assets/logo.jpg", include_in_schema=False)
@@ -1153,192 +1441,46 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "paprika-kiosk"}
 
 
-@app.get("/api/menu", response_model=MenuResponse)
-def get_menu() -> MenuResponse:
-    if CATALOG_ERROR or not PRODUCTS:
-        raise HTTPException(
-            status_code=503,
-            detail=CATALOG_ERROR or "Каталог товаров из файла tovar.xlsx недоступен.",
-        )
+def menu_response(store_id: int) -> MenuResponse:
+    catalog = catalog_for(store_id)
     return MenuResponse(
         currency=CURRENCY,
         max_order_total=float(MAX_ORDER_TOTAL),
-        categories=CATEGORIES,
-        products=PRODUCTS,
+        categories=catalog.categories,
+        products=catalog.products,
     )
 
 
-def validate_product_category(category_id: str) -> None:
-    if category_id not in {category.id for category in CATEGORIES}:
-        raise HTTPException(status_code=422, detail="Выберите существующую категорию.")
+@app.get("/api/menu", response_model=MenuResponse)
+def get_menu(x_device_key: DeviceKey = None) -> MenuResponse:
+    device = stores.require_device(x_device_key, "kiosk")
+    return menu_response(device.store_id)
 
 
-def persist_product(product: Product, *, is_custom: bool) -> None:
-    try:
-        save_product_setting(product, is_custom=is_custom)
-        refresh_catalog()
-    except sqlite3.Error as exc:
-        logger.exception("Could not save product %s", product.id)
-        raise HTTPException(status_code=500, detail="Не удалось сохранить товар.") from exc
-    if CATALOG_ERROR:
-        raise HTTPException(status_code=503, detail=CATALOG_ERROR)
-
-
-@app.get("/api/admin/products")
-def admin_products(
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    require_admin(authorization)
-    if CATALOG_ERROR:
-        raise HTTPException(status_code=503, detail=CATALOG_ERROR)
+@app.get("/api/device")
+def get_device(x_device_key: DeviceKey = None) -> dict[str, Any]:
+    """Which store and device this browser is activated as."""
+    device = stores.require_device(x_device_key)
     return {
-        "categories": [category.model_dump() for category in CATEGORIES],
-        "products": [product.model_dump() for product in PRODUCTS],
+        "id": device.id,
+        "kind": device.kind,
+        "name": device.name,
+        "store_id": device.store_id,
+        "store_name": device.store_name,
     }
-
-
-@app.post("/api/admin/products", status_code=201)
-def create_product(
-    payload: ProductCreate,
-    authorization: Annotated[str | None, Header()] = None,
-) -> Product:
-    require_admin(authorization)
-    validate_product_category(payload.category_id)
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Укажите название товара.")
-    product_id = str(uuid.uuid4())
-    category = next(category for category in CATEGORIES if category.id == payload.category_id)
-    product = Product(
-        id=product_id,
-        name=name,
-        category_id=payload.category_id,
-        description=category.name,
-        price=float(payload.price),
-        available=payload.available,
-        image=_image_for_product(name, category.name),
-        unit=payload.unit,
-        ingredients=(
-            payload.ingredients.strip()
-            if payload.ingredients is not None
-            else default_ingredients(name)
-        ),
-        priority=payload.priority,
-    )
-    persist_product(product, is_custom=True)
-    return product
-
-
-@app.put("/api/admin/products/{product_id}")
-def update_product(
-    product_id: str,
-    payload: ProductUpdate,
-    authorization: Annotated[str | None, Header()] = None,
-) -> Product:
-    require_admin(authorization)
-    existing = PRODUCT_BY_ID.get(product_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Товар не найден.")
-    validate_product_category(payload.category_id)
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Укажите название товара.")
-    category = next(category for category in CATEGORIES if category.id == payload.category_id)
-    product = existing.model_copy(
-        update={
-            "name": name,
-            "category_id": payload.category_id,
-            "description": category.name,
-            "price": float(payload.price),
-            "available": payload.available,
-            **(
-                {"ingredients": payload.ingredients.strip()}
-                if payload.ingredients is not None
-                else {}
-            ),
-            **(
-                {"priority": payload.priority}
-                if "priority" in payload.model_fields_set
-                else {}
-            ),
-        }
-    )
-    with closing(connect_db()) as connection:
-        row = connection.execute(
-            "SELECT is_custom FROM product_settings WHERE product_id = ?",
-            (product_id,),
-        ).fetchone()
-    persist_product(product, is_custom=bool(row["is_custom"]) if row else False)
-    return product
-
-
-@app.post("/api/admin/products/{product_id}/image")
-async def upload_product_image(
-    product_id: str,
-    authorization: Annotated[str | None, Header()] = None,
-    image: UploadFile = File(...),
-) -> Product:
-    require_admin(authorization)
-    existing = PRODUCT_BY_ID.get(product_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Товар не найден.")
-    content = await image.read(MAX_PRODUCT_IMAGE_SIZE + 1)
-    if len(content) > MAX_PRODUCT_IMAGE_SIZE:
-        raise HTTPException(status_code=413, detail="Размер изображения не должен превышать 5 МБ.")
-    image_types = (
-        (content.startswith(b"\xff\xd8\xff"), "jpg"),
-        (content.startswith(b"\x89PNG\r\n\x1a\n"), "png"),
-        (len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP", "webp"),
-    )
-    extension = next((extension for is_valid, extension in image_types if is_valid), None)
-    if extension is None:
-        raise HTTPException(
-            status_code=415,
-            detail="Поддерживаются изображения JPEG, PNG и WebP.",
-        )
-    IMAGE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{uuid.uuid4().hex}.{extension}"
-    image_path = IMAGE_UPLOAD_DIR / filename
-    try:
-        image_path.write_bytes(content)
-    except OSError as exc:
-        logger.exception("Could not save uploaded product image")
-        raise HTTPException(status_code=500, detail="Не удалось сохранить изображение.") from exc
-
-    product = existing.model_copy(update={"image": f"/static/images/uploads/{filename}"})
-    with closing(connect_db()) as connection:
-        row = connection.execute(
-            "SELECT is_custom FROM product_settings WHERE product_id = ?",
-            (product_id,),
-        ).fetchone()
-    try:
-        persist_product(product, is_custom=bool(row["is_custom"]) if row else False)
-    except HTTPException:
-        image_path.unlink(missing_ok=True)
-        raise
-    previous_image = existing.image
-    if previous_image.startswith("/static/images/uploads/"):
-        previous_path = STATIC_DIR / previous_image.removeprefix("/static/")
-        if previous_path.parent == IMAGE_UPLOAD_DIR and previous_path != image_path:
-            previous_path.unlink(missing_ok=True)
-    return product
 
 
 @app.post("/api/orders", status_code=201)
 def create_order(
     payload: OrderInput,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    x_device_key: DeviceKey = None,
 ) -> dict[str, Any]:
-    if idempotency_key is None:
-        raise HTTPException(status_code=400, detail="Отсутствует ключ запроса.")
-    try:
-        parsed_key = str(uuid.UUID(idempotency_key))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Некорректный ключ запроса.") from exc
-
+    device = stores.require_device(x_device_key, "kiosk")
+    parsed_key = parse_idempotency_key(idempotency_key)
     if payload.service_type is None:
         raise HTTPException(status_code=422, detail="Выберите: в зале или с собой.")
-    normalized, total = resolve_order_items(payload)
+    normalized, total = resolve_order_items(payload, catalog_for(device.store_id))
     comment = payload.comment.strip()
     request_data = payload.model_dump(mode="json")
     for item in request_data["items"]:
@@ -1351,65 +1493,29 @@ def create_order(
         request_data, sort_keys=True, separators=(",", ":")
     )
     request_hash = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
-    created_at = datetime.now(timezone.utc).isoformat()
-
-    with closing(connect_db()) as connection:
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM orders WHERE idempotency_key = ?", (parsed_key,)
-            ).fetchone()
-            if existing is not None:
-                if existing["request_hash"] != request_hash:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Ключ уже использован для другого состава заказа.",
-                    )
-                connection.commit()
-                return public_order(existing)
-
-            cursor = connection.execute(
-                """
-                INSERT INTO orders
-                    (idempotency_key, request_hash, order_number, total,
-                     items_json, created_at, mode, comment, service_type)
-                VALUES (?, ?, 'pending', ?, ?, ?, 'local', ?, ?)
-                """,
-                (
-                    parsed_key,
-                    request_hash,
-                    total,
-                    json.dumps(normalized, ensure_ascii=False),
-                    created_at,
-                    comment,
-                    payload.service_type,
-                ),
-            )
-            order_number = f"P-{cursor.lastrowid:05d}"
-            connection.execute(
-                "UPDATE orders SET order_number = ? WHERE id = ?",
-                (order_number, cursor.lastrowid),
-            )
-            connection.commit()
-        except HTTPException:
-            connection.rollback()
-            raise
-        except sqlite3.Error as exc:
-            connection.rollback()
-            logger.exception("Could not persist order")
-            raise HTTPException(status_code=500, detail="Не удалось сохранить заказ.") from exc
-
-        row = connection.execute(
-            "SELECT * FROM orders WHERE idempotency_key = ?", (parsed_key,)
-        ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=500, detail="Не удалось получить созданный заказ.")
-        result = public_order(row)
+    row, created = store_order(
+        parsed_key,
+        request_hash,
+        {
+            "total": total,
+            "items_json": json.dumps(normalized, ensure_ascii=False),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "comment": comment,
+            "service_type": payload.service_type,
+            "source": "kiosk",
+            "kitchen_status": "preparing",
+            "store_id": device.store_id,
+            "device_id": device.id,
+        },
+    )
+    result = public_order(row)
+    if not created:
+        return result
 
     try:
-        OrderPrinter.print_order(result)
-        result["print_status"] = "printed"
-        update_print_status(parsed_key, "printed")
+        OrderPrinter.print_order(result, device.store_id)
+        result["print_status"] = "queued"
+        update_print_status(parsed_key, "queued")
     except PrinterError as exc:
         result["print_status"] = "failed"
         update_print_status(parsed_key, "failed")
@@ -1435,112 +1541,6 @@ def update_order_print_status(order_number: str, status: str) -> None:
         connection.commit()
 
 
-@app.get("/api/admin/status")
-def admin_status(
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    require_admin(authorization)
-    return {
-        "printer": OrderPrinter.health(),
-        "orders_saved": True,
-    }
-
-
-@app.get("/api/admin/printer")
-def get_printer_settings(
-    authorization: Annotated[str | None, Header()] = None,
-) -> PrinterSettings:
-    require_admin(authorization)
-    return load_printer_settings()
-
-
-@app.put("/api/admin/printer")
-def update_printer_settings(
-    payload: PrinterSettings,
-    authorization: Annotated[str | None, Header()] = None,
-) -> PrinterSettings:
-    require_admin(authorization)
-    try:
-        save_printer_settings(payload)
-    except sqlite3.Error as exc:
-        logger.exception("Could not save printer settings")
-        raise HTTPException(status_code=500, detail="Не удалось сохранить настройки.") from exc
-    return payload
-
-
-@app.post("/api/admin/printer/preview")
-def preview_receipt(
-    payload: PrinterSettings,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    require_admin(authorization)
-    return {
-        "chars_per_line": payload.chars_per_line,
-        "lines": build_receipt(sample_order(), payload),
-    }
-
-
-@app.post("/api/admin/printer/check")
-def check_printer(
-    payload: PrinterSettings,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    require_admin(authorization)
-    return OrderPrinter.health(payload)
-
-
-@app.post("/api/admin/printer/test")
-def print_test_receipt(
-    payload: PrinterSettings,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, str]:
-    require_admin(authorization)
-    try:
-        OrderPrinter.print_order(sample_order(), payload)
-    except PrinterError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"message": "Пробный чек отправлен на принтер."}
-
-
-@app.post("/api/admin/print")
-def reprint_order(
-    payload: PrintInput,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    require_admin(authorization)
-    with closing(connect_db()) as connection:
-        row = connection.execute(
-            "SELECT * FROM orders WHERE order_number = ?",
-            (payload.order_ref,),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Заказ не найден.")
-    try:
-        OrderPrinter.print_order(public_order(row))
-    except PrinterError as exc:
-        logger.warning("Reprint failed for order %s: %s", row["order_number"], exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    update_order_print_status(row["order_number"], "printed")
-    return {
-        "order_number": display_order_number(row["id"]),
-        "order_ref": row["order_number"],
-        "print_status": "printed",
-        "comment_printed": bool(row["comment"]),
-    }
-
-
-@app.get("/api/admin/orders")
-def admin_orders(
-    authorization: Annotated[str | None, Header()] = None,
-) -> list[dict[str, Any]]:
-    require_admin(authorization)
-    with closing(connect_db()) as connection:
-        rows = connection.execute(
-            "SELECT * FROM orders ORDER BY id DESC LIMIT 50"
-        ).fetchall()
-    return [public_order(row) for row in rows]
-
-
 def report_period_bounds(
     start_date: date | None,
     end_date: date | None,
@@ -1558,140 +1558,13 @@ def report_period_bounds(
     return start, end, start_utc.isoformat(), end_utc.isoformat()
 
 
-def build_report(
-    start_date: date | None,
-    end_date: date | None,
-) -> tuple[dict[str, Any], list[sqlite3.Row]]:
-    start, end, start_utc, end_utc = report_period_bounds(start_date, end_date)
-    with closing(connect_db()) as connection:
-        rows = connection.execute(
-            """
-            SELECT id, order_number, total, items_json, created_at, print_status, comment,
-                   service_type
-            FROM orders
-            WHERE created_at >= ? AND created_at < ?
-            ORDER BY created_at, id
-            """,
-            (start_utc, end_utc),
-        ).fetchall()
+# The modules below use the helpers above.
+from app import printing, stores  # noqa: E402
+from app.admin import router as admin_router  # noqa: E402
+from app.offline import router as offline_router  # noqa: E402
+from app.pos import router as pos_router  # noqa: E402
 
-    product_summary: dict[str, dict[str, Any]] = {}
-    item_count = 0
-    total_amount = Decimal("0")
-    for row in rows:
-        total_amount += Decimal(str(row["total"]))
-        for item in json.loads(row["items_json"]):
-            key = item["product_id"]
-            summary = product_summary.setdefault(
-                key,
-                {
-                    "product_id": key,
-                    "name": item["name"],
-                    "unit": item.get("unit", "шт."),
-                    "quantity": 0,
-                    "amount": Decimal("0"),
-                },
-            )
-            summary["quantity"] += item["quantity"]
-            summary["amount"] += Decimal(str(item["unit_price"])) * item["quantity"]
-            if item.get("weight_grams") is not None:
-                summary["weight_grams"] = (
-                    summary.get("weight_grams", 0)
-                    + item["weight_grams"] * item["quantity"]
-                )
-            item_count += item["quantity"]
-
-    report = {
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-        "orders_count": len(rows),
-        "items_count": item_count,
-        "total_amount": float(round(total_amount, 2)),
-        "average_order_amount": (
-            float(round(total_amount / len(rows), 2)) if rows else 0
-        ),
-        "products": sorted(
-            (
-                {**item, "amount": float(item["amount"])}
-                for item in product_summary.values()
-            ),
-            key=lambda item: item["amount"],
-            reverse=True,
-        ),
-    }
-    return report, rows
-
-
-@app.get("/api/admin/report")
-def admin_report(
-    authorization: Annotated[str | None, Header()] = None,
-    start_date: date | None = None,
-    end_date: date | None = None,
-) -> dict[str, Any]:
-    require_admin(authorization)
-    report, _ = build_report(start_date, end_date)
-    return report
-
-
-@app.get("/api/admin/report.csv")
-def download_admin_report(
-    authorization: Annotated[str | None, Header()] = None,
-    start_date: date | None = None,
-    end_date: date | None = None,
-) -> Response:
-    require_admin(authorization)
-    report, orders = build_report(start_date, end_date)
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, delimiter=";")
-    writer.writerow(["Период", report["start_date"], report["end_date"]])
-    writer.writerow(["Количество заказов", report["orders_count"]])
-    writer.writerow(["Количество позиций", report["items_count"]])
-    writer.writerow(["Общая сумма", report["total_amount"]])
-    writer.writerow([])
-    writer.writerow(
-        [
-            "Номер заказа",
-            "Внутренний номер",
-            "Дата и время (UTC)",
-            "В зале / с собой",
-            "Товар",
-            "Вариант",
-            "Добавки",
-            "Количество",
-            "Единица",
-            "Цена за единицу",
-            "Сумма порции",
-            "Вес порции (г)",
-            "Сумма позиции",
-            "Комментарий к заказу",
-            "Оплата",
-        ]
-    )
-    for order in orders:
-        for item in json.loads(order["items_json"]):
-            writer.writerow(
-                [
-                    display_order_number(order["id"]),
-                    order["order_number"],
-                    order["created_at"],
-                    SERVICE_TYPE_LABELS.get(order["service_type"], ""),
-                    item["name"],
-                    item["variant"]["name"] if item["variant"] else "",
-                    ", ".join(modifier["name"] for modifier in item["modifiers"]),
-                    item["quantity"],
-                    item.get("unit", "шт."),
-                    item["unit_price"],
-                    item.get("portion_amount") or "",
-                    item.get("weight_grams") or "",
-                    item["unit_price"] * item["quantity"],
-                    order["comment"],
-                    "не оплачено",
-                ]
-            )
-
-    filename = f"paprika-orders-{report['start_date']}-{report['end_date']}.csv"
-    return Response(
-        content="\ufeff" + output.getvalue(),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+app.include_router(pos_router)
+app.include_router(offline_router)
+app.include_router(admin_router)
+app.include_router(printing.router)

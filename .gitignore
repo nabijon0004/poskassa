@@ -3,3 +3,11 @@
 __pycache__/
 .pytest_cache/
 data/
+desktop/build/
+desktop/dist/
+desktop/*.spec
+desktop/paprika.ico
+desktop/pos-config.json
+desktop/pos-app.log
+desktop/webview-data/
+desktop/dist-new/

@@ -30,7 +30,6 @@ button:focus-visible { outline: 3px solid #e69a7f; outline-offset: 3px; }
 .language-indicator { padding: 10px; color: #746f65; font-size: 13px; font-weight: 700; }
 #main { width: min(1260px, calc(100% - 48px)); margin: 0 auto; flex: 1; }
 .site-footer { display: flex; justify-content: space-between; align-items: center; padding: 23px clamp(22px, 5vw, 76px); color: var(--muted); font-size: 12px; }
-.admin-link { border: 0; background: transparent; color: #918c81; font-size: 12px; padding: 8px; }
 .notice { position: fixed; top: 94px; left: 50%; z-index: 20; transform: translateX(-50%); max-width: calc(100% - 32px); padding: 14px 20px; border-radius: 14px; color: #fff; background: #392e28; box-shadow: var(--shadow); text-align: center; }
 
 .welcome { display: grid; grid-template-columns: 1fr .92fr; align-items: center; gap: 28px; min-height: 680px; padding: 42px 0 58px; }
@@ -153,76 +152,6 @@ h1, h2, h3, p { margin-top: 0; }
 .option-price { color: var(--muted); white-space: nowrap; }
 .modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 25px; padding-top: 17px; border-top: 1px solid var(--line); }
 .modal-total { font: 800 20px Manrope, sans-serif; }
-.admin-panel { width: min(980px, 100%); }
-.admin-products { margin: 22px 0 27px; padding: 18px; border: 1px solid var(--line); border-radius: 15px; background: #fffefa; }
-.admin-products .admin-section-heading h3 { margin: 0; font: 700 17px Manrope, sans-serif; }
-.admin-products > .modal-description { margin: 9px 0 13px; font-size: 11px; }
-.admin-product-row { display: grid; grid-template-columns: 54px minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f0eee8; }
-#adminProductList { max-height: 350px; overflow: auto; }
-.admin-product-row > img { width: 54px; height: 48px; border-radius: 9px; object-fit: cover; background: #f3f1eb; }
-.admin-product-info { min-width: 0; }
-.admin-product-info strong, .admin-product-info small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.admin-product-info strong { font-size: 12px; }
-.admin-product-info small { margin-top: 4px; color: var(--muted); font-size: 10px; }
-.product-status { font-size: 10px; white-space: nowrap; }
-.product-priority { min-width: 34px; color: var(--tomato-dark); font-size: 11px; font-weight: 700; text-align: right; white-space: nowrap; }
-.product-status.is-available { color: var(--green); }
-.product-status.is-unavailable { color: #a84a32; }
-.product-editor { display: grid; gap: 12px; margin: 14px 0; padding: 16px; border: 1px solid #e7d7c8; border-radius: 13px; background: #faf8f3; }
-.product-editor h4 { margin: 0; font-size: 14px; }
-.product-editor label { display: grid; gap: 6px; color: #746f65; font-size: 11px; font-weight: 600; }
-.product-editor textarea { resize: vertical; line-height: 1.4; }
-.product-editor label small { font-weight: 400; }
-.product-editor input:not([type="checkbox"]), .product-editor select, .product-editor textarea { width: 100%; min-height: 39px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font: inherit; color: var(--ink); }
-.product-editor-fields { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 12px; }
-.product-editor .product-image-picker small { color: var(--muted); font-weight: 400; }
-.product-editor .product-availability { display: flex; align-items: center; gap: 8px; color: var(--ink); }
-.product-availability input { width: 18px; height: 18px; accent-color: var(--tomato); }
-.product-editor-actions { display: flex; justify-content: end; gap: 8px; }
-.product-editor-message { min-height: 16px; margin: 0; color: #a84a32; font-size: 11px; }
-.printer-layout { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 22px; align-items: start; margin-top: 6px; }
-.printer-fields { display: grid; gap: 11px; }
-.printer-fields h4, .receipt-preview-wrap h4 { margin: 8px 0 0; font-size: 13px; }
-.printer-fields label { display: grid; gap: 6px; color: #746f65; font-size: 11px; font-weight: 600; }
-.printer-fields label small { font-weight: 400; }
-.printer-fields input:not([type="checkbox"]), .printer-fields select { width: 100%; min-height: 39px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font: inherit; color: var(--ink); }
-.printer-advanced summary { cursor: pointer; color: #746f65; font-size: 11px; font-weight: 700; }
-.printer-advanced[open] summary { margin-bottom: 10px; }
-.printer-checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
-.printer-fields .printer-check { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 12px; font-weight: 500; }
-.printer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.small-button.primary-small { border-color: var(--tomato); color: white; background: var(--tomato); }
-.product-editor-message.is-error { color: var(--tomato-dark); }
-.receipt-preview-wrap { position: sticky; top: 0; display: grid; gap: 8px; justify-items: center; }
-.receipt-preview-wrap small { max-width: 260px; color: var(--muted); font-size: 10px; text-align: center; }
-.receipt-paper { --receipt-columns: 48; width: calc(var(--receipt-columns) * 0.6em + 24px); padding: 18px 12px 26px; background: #fff; box-shadow: 0 6px 22px rgba(44, 37, 25, .16); font: 10px/1.35 "Courier New", Consolas, monospace; color: #111; overflow: hidden; }
-.receipt-row { white-space: pre; overflow: hidden; }
-@media (max-width: 760px) {
-  .printer-layout { grid-template-columns: 1fr; }
-  .receipt-paper { font-size: 7px; }
-}
-.admin-panel pre { overflow: auto; padding: 15px; border-radius: 12px; background: #f3f1eb; white-space: pre-wrap; font: 12px/1.7 "DM Sans", sans-serif; }
-.admin-report { margin: 22px 0 27px; padding: 18px; border: 1px solid var(--line); border-radius: 15px; background: #fffefa; }
-.admin-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.admin-section-heading h3 { margin: 0 0 12px; font: 700 17px Manrope, sans-serif; }
-.admin-section-heading > span { margin-bottom: 12px; color: var(--muted); font-size: 11px; }
-.report-filters { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; }
-.report-filters label { display: grid; gap: 5px; color: var(--muted); font-size: 10px; font-weight: 600; }
-.report-filters input { min-height: 39px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font: inherit; }
-.report-filters button { min-height: 39px; }
-.report-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin: 16px 0; }
-.report-metrics > div { min-width: 0; padding: 12px 10px; border-radius: 11px; background: #f5f3ee; }
-.report-metrics span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; }
-.report-metrics strong { display: block; overflow: hidden; font: 800 15px Manrope, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-.report-product-list { max-height: 200px; overflow: auto; }
-.report-product { display: grid; grid-template-columns: minmax(0, 1fr) 82px 100px; gap: 8px; padding: 9px 5px; border-bottom: 1px solid #f0eee8; font-size: 11px; }
-.report-product span:nth-child(n+2) { text-align: right; }
-.report-product-header { color: var(--muted); font-size: 10px; font-weight: 700; }
-.report-empty { padding: 8px 2px; color: var(--muted); font-size: 12px; }
-.report-export { margin-top: 13px; }
-.admin-order { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
-.small-button { border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; background: white; font-size: 11px; font-weight: 700; }
-.small-button:disabled { color: #a8a49c; background: #f3f1eb; cursor: not-allowed; }
 .input-field { width: 100%; margin: 12px 0 16px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: white; font: inherit; }
 .load-error { max-width: 650px; margin: 80px auto; padding: 38px; border-radius: 20px; background: white; text-align: center; }
 .load-error h1 { font: 800 32px Manrope, sans-serif; }
@@ -264,26 +193,16 @@ h1, h2, h3, p { margin-top: 0; }
   .product-grid { gap: 9px; }
   .food-art { min-height: 120px; }
 }
-@media (max-width: 520px) {
-  .report-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .admin-report { padding: 13px; }
-  .admin-products { padding: 13px; }
-  .admin-product-row { grid-template-columns: 44px minmax(0, 1fr) auto auto; gap: 7px; }
-  .admin-product-row > img { width: 44px; height: 42px; }
-  .admin-product-row .product-status { display: none; }
-  .admin-product-row .small-button { padding: 7px; }
-  .product-editor-fields { grid-template-columns: 1fr; }
-}
 
 /* Touch-friendly ordering: large text and tap targets (at least 48px) for kiosk screens. */
 .add-button { width: 52px; height: 52px; border-radius: 15px; font-size: 30px; }
 .product-info h3 { font-size: 17px; }
 .price { font-size: 19px; }
 
-.modal:not(.admin-panel) { width: min(640px, 100%); padding: 32px; }
+.modal { width: min(640px, 100%); padding: 32px; }
 .modal-heading h2 { font-size: 30px; }
 .close-button { flex-basis: 52px; height: 52px; font-size: 28px; }
-.modal:not(.admin-panel) .modal-description { font-size: 16px; }
+.modal .modal-description { font-size: 16px; }
 .option-group { margin: 26px 0; }
 .option-group h3 { margin-bottom: 14px; font-size: 18px; }
 .option-row { min-height: 60px; padding: 0 18px; font-size: 17px; }
@@ -364,3 +283,11 @@ h1, h2, h3, p { margin-top: 0; }
 .kb-action.active { color: white; background: var(--ink); }
 .kb-space { flex: 5 1 0; max-width: none; font-size: 16px; }
 .kb-done { flex: 2 1 0; max-width: 130px; color: white; background: var(--tomato); font-size: 18px; }
+
+/* Device activation screen (shown until the kiosk is linked to a store). */
+.device-setup { max-width: 620px; margin: 80px auto; padding: 38px; border-radius: 20px; background: white; text-align: center; }
+.device-setup h1 { font: 800 32px Manrope, sans-serif; }
+.device-setup p { color: var(--muted); line-height: 1.6; }
+.device-setup-form { display: flex; gap: 10px; margin-top: 18px; }
+.device-setup-form input { flex: 1; min-height: 52px; padding: 0 14px; border: 1px solid var(--line); border-radius: 14px; font: inherit; }
+.device-setup-form button { min-height: 52px; padding: 0 22px; border: 0; border-radius: 14px; color: white; background: var(--tomato); font-weight: 700; }
