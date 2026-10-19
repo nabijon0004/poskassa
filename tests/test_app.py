@@ -114,16 +114,21 @@ def test_strips_and_wings_accept_any_weight_or_amount(client):
         product = catalog().product_by_id[product_id]
         assert product.price == 95
         assert product.weighted.min_grams == 200
-        assert product.weighted.max_grams == 3000
+        assert product.weighted.max_grams == 11000
         assert product.weighted.min_amount == 20
         assert product.weighted.max_amount == 300
-        assert product.weighted.preset_grams == [500, 1000, 1500, 2000]
+        assert product.weighted.preset_grams == [200, 500, 1000, 1500]
         assert product.weighted.default_grams == 1000
 
     for kind, value, amount, weight in (
-        ("weight", 200, 19, 200),
+        # 0,2 kg costs the minimum 20 somoni rather than 19.
+        ("weight", 200, 20, 200),
+        ("weight", 210, 20, 210),
+        ("weight", 220, 20.9, 220),
         ("weight", 350, 33.25, 350),
         ("weight", 3000, 285, 3000),
+        # 11 kg (1045) is allowed, but the kiosk order limit is 1000 somoni.
+        ("weight", 10000, 950, 10000),
         ("price", 20, 20, 211),
         ("price", 37, 37, 389),
         ("price", 300, 300, 3158),
@@ -148,7 +153,7 @@ def test_weighted_portion_is_required_and_limited(client):
 
     assert missing.status_code == 422
     assert order_portion(client, "weight", 199).status_code == 422
-    assert order_portion(client, "weight", 3001).status_code == 422
+    assert order_portion(client, "weight", 11001).status_code == 422
     assert order_portion(client, "price", 19).status_code == 422
     assert order_portion(client, "price", 301).status_code == 422
     assert order_portion(client, "price", 20, product_id="4").status_code == 422
@@ -332,8 +337,8 @@ def test_weighted_portions_are_included_in_report_and_csv(client):
             "weight_grams": 1052,
         }
     ]
-    assert "Сумма порции;Вес порции (г)" in csv_response.text
-    assert ";50.0;526;" in csv_response.text
+    assert "Сумма порции;Вес порции (кг)" in csv_response.text
+    assert ";50.0;0.526;" in csv_response.text
 
 
 def test_idempotency_key_cannot_be_reused_for_different_order(client):
@@ -393,7 +398,7 @@ def test_created_order_is_printed_once_as_kitchen_receipt(client, monkeypatch):
     assert data.startswith(b"\x1b@\x1bt\x11")
     assert b"\x1d!\x11" + number + b"\n" in data
     assert f"2 x {catalog().product_by_id['4'].name}".encode("cp866") in data
-    assert "    500 г".encode("cp866") in data
+    assert "    0,5 кг".encode("cp866") in data
     assert "ИТОГО".encode("cp866") in data
     assert "КУХНЯ".encode("cp866") in data
     assert data.endswith(b"\x1bd\x03\x1dV\x01")

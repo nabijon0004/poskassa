@@ -69,7 +69,17 @@ function moneyText(amount) {
 }
 
 function formatGrams(grams) {
-  return grams >= 1000 && grams % 100 === 0 ? `${(grams / 1000).toLocaleString("ru-RU")} кг` : `${grams} г`;
+  // Weights are shown in kilograms: 200 -> "0,2 кг", 1052 -> "1,052 кг".
+  return `${(grams / 1000).toLocaleString("ru-RU", { maximumFractionDigits: 3 })} кг`;
+}
+
+// Price of a weighted portion: at least the minimum amount (0,2 kg costs 20, not 19).
+function weightPrice(grams, pricing) {
+  return Math.max(round2(grams * pricing.price_per_kg / 1000), pricing.min_amount);
+}
+
+function kgText(grams) {
+  return (grams / 1000).toLocaleString("ru-RU", { maximumFractionDigits: 3, useGrouping: false });
 }
 
 function formatTime(iso) {
@@ -764,34 +774,37 @@ function resetSale() {
 function openWeightedDialog(product) {
   const pricing = product.weighted;
   let mode = "weight";
-  let value = String(pricing.default_grams);
+  // The weight is entered in kilograms (e.g. "0,35"); the server gets grams.
+  let value = kgText(pricing.default_grams);
   const modal = openModal(`
     <div class="modal-head"><h3>${escapeHtml(product.name)}</h3><button class="modal-close" data-close>×</button></div>
-    <div class="segmented" style="margin-bottom:12px"><button data-mode="weight">Вес, г</button><button data-mode="price">Сумма, ${escapeHtml(state.currency)}</button></div>
-    <div class="preset-grid">${pricing.preset_grams.map((grams) => `<button data-grams="${grams}">${formatGrams(grams)}<small>${moneyText(round2(grams * pricing.price_per_kg / 1000))}</small></button>`).join("")}</div>
+    <div class="segmented" style="margin-bottom:12px"><button data-mode="weight">Вес, кг</button><button data-mode="price">Сумма, ${escapeHtml(state.currency)}</button></div>
+    <div class="preset-grid">${pricing.preset_grams.map((grams) => `<button data-grams="${grams}">${formatGrams(grams)}<small>${moneyText(weightPrice(grams, pricing))}</small></button>`).join("")}</div>
     <div class="amount-display" id="weightedValue"></div>
     <p class="hint" id="weightedHint"></p>
-    ${keypadHtml()}
+    ${keypadHtml({ decimal: true })}
     <div class="modal-actions"><button class="btn" data-close>Отмена</button><button class="btn btn-primary" id="addWeighted">Добавить</button></div>`);
   const portion = () => {
-    const number = Number(value);
-    if (!Number.isInteger(number) || !value) return null;
+    if (!value || value.endsWith(",")) return null;
     if (mode === "weight") {
-      if (number < pricing.min_grams || number > pricing.max_grams) return null;
-      return { kind: "weight", value: number, grams: number, amount: round2(number * pricing.price_per_kg / 1000) };
+      const grams = Math.round(parseAmount(value) * 1000);
+      if (grams < pricing.min_grams || grams > pricing.max_grams) return null;
+      return { kind: "weight", value: grams, grams, amount: weightPrice(grams, pricing) };
     }
+    const number = Number(value);
+    if (!Number.isInteger(number)) return null;
     if (number < pricing.min_amount || number > pricing.max_amount) return null;
     return { kind: "price", value: number, amount: number, grams: Math.round(number * 1000 / pricing.price_per_kg) };
   };
   const draw = () => {
     const selected = portion();
     modal.querySelectorAll("[data-mode]").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
-    modal.querySelectorAll("[data-grams]").forEach((button) => button.classList.toggle("active", mode === "weight" && button.dataset.grams === value));
-    modal.querySelector("#weightedValue").textContent = `${value || "0"} ${mode === "weight" ? "г" : state.currency}`;
+    modal.querySelectorAll("[data-grams]").forEach((button) => button.classList.toggle("active", mode === "weight" && Number(button.dataset.grams) === portion()?.grams));
+    modal.querySelector("#weightedValue").textContent = `${value || "0"} ${mode === "weight" ? "кг" : state.currency}`;
     const hint = modal.querySelector("#weightedHint");
     hint.classList.toggle("error", !selected);
     hint.textContent = !selected
-      ? mode === "weight" ? `Вес от ${pricing.min_grams} г до ${formatGrams(pricing.max_grams)}` : `Сумма от ${pricing.min_amount} до ${pricing.max_amount} ${state.currency}`
+      ? mode === "weight" ? `Вес от ${formatGrams(pricing.min_grams)} до ${formatGrams(pricing.max_grams)}` : `Сумма от ${pricing.min_amount} до ${pricing.max_amount} ${state.currency}`
       : mode === "weight" ? `К оплате: ${moneyText(selected.amount)}` : `Примерно ${formatGrams(selected.grams)}`;
     modal.querySelector("#addWeighted").disabled = !selected;
   };
@@ -802,10 +815,14 @@ function openWeightedDialog(product) {
   }));
   modal.querySelectorAll("[data-grams]").forEach((button) => button.addEventListener("click", () => {
     mode = "weight";
-    value = button.dataset.grams;
+    value = kgText(Number(button.dataset.grams));
     draw();
   }));
-  bindKeypad(modal, (key) => { value = applyKey(value, key, { maxLength: 4 }); draw(); });
+  bindKeypad(modal, (key) => {
+    // Kilograms with a comma (up to 2 decimals); the amount in whole somoni.
+    value = applyKey(value, key, mode === "weight" ? { decimal: true, maxLength: 5 } : { maxLength: 3 });
+    draw();
+  });
   modal.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", closeModal));
   modal.querySelector("#addWeighted").addEventListener("click", () => {
     const selected = portion();

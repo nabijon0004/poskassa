@@ -191,7 +191,7 @@ const receipts = {
   },
 
   grams(grams) {
-    return grams >= 1000 && grams % 100 === 0 ? `${String(grams / 1000).replace(".", ",")} кг` : `${grams} г`;
+    return `${(grams / 1000).toFixed(3).replace(/0+$/, "").replace(/\.$/, "").replace(".", ",")} кг`;
   },
 
   dateTime(iso) {

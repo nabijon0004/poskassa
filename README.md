@@ -20,11 +20,13 @@ deploying. The generic category photos are from Unsplash and are governed by
 the [Unsplash license](https://unsplash.com/license). None of these are
 official product images of the cafe.
 
-Strips and wings sold by weight are priced at 95 somoni per kilogram. In the
-product window the customer taps a quick weight (0.5 / 1 / 1.5 / 2 kg, 1 kg is
-preselected) or enters their own amount from 20 to 300 somoni on an on-screen
-numeric keypad and sees the approximate weight. The server validates the limits
-and recalculates the price.
+Strips and wings sold by weight are priced at 95 somoni per kilogram, with a
+minimum of 20 somoni per portion (0,2 kg costs 20). In the product window the
+customer taps a quick weight (0,2 / 0,5 / 1 / 1,5 kg, 1 kg is preselected) or
+enters their own amount from 20 to 300 somoni on an on-screen numeric keypad and
+sees the approximate weight; the register can also enter a weight in kilograms
+(0,2–11 kg). Weights are shown in kilograms everywhere, including receipts,
+reports and CSV. The server validates the limits and recalculates the price.
 
 The categories «Горячие напитки», «Прочие», «Прочее» and «Мороженое» from
 `tovar.xlsx` are hidden from the kiosk menu (`EXCLUDED_CATEGORIES` in

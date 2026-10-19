@@ -42,6 +42,10 @@ function money(amount) {
   return `${value} с`;
 }
 
+function kg(grams) {
+  return `${(grams / 1000).toLocaleString("ru-RU", { maximumFractionDigits: 3 })} кг`;
+}
+
 function formatDateTime(iso) {
   return iso ? new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 }
@@ -921,7 +925,7 @@ function groupTable(title, rows) {
 function reportHtml(report) {
   const products = report.products.length
     ? `<div class="table-wrap"><table class="data"><thead><tr><th>Блюдо</th><th class="num">Количество</th><th class="num">Сумма</th></tr></thead><tbody>${report.products.map((product) => `
-        <tr><td>${escapeHtml(product.name)}</td><td class="num">${product.quantity} ${escapeHtml(product.unit || "шт.")}${product.weight_grams ? ` · ≈ ${product.weight_grams} г` : ""}</td><td class="num">${money(product.amount)}</td></tr>`).join("")}</tbody></table></div>`
+        <tr><td>${escapeHtml(product.name)}</td><td class="num">${product.quantity} ${escapeHtml(product.unit || "шт.")}${product.weight_grams ? ` · ≈ ${kg(product.weight_grams)}` : ""}</td><td class="num">${money(product.amount)}</td></tr>`).join("")}</tbody></table></div>`
     : `<p class="empty">За выбранный период заказов нет.</p>`;
   return `
     <div class="metrics">
@@ -1047,7 +1051,7 @@ async function loadReportOrders(container, query) {
 function itemDetails(item) {
   const details = [];
   if (item.weight_grams) {
-    details.push(item.portion_kind === "price" ? `на ${money(item.portion_amount)} ≈ ${item.weight_grams} г` : `${item.weight_grams} г`);
+    details.push(item.portion_kind === "price" ? `на ${money(item.portion_amount)} ≈ ${kg(item.weight_grams)}` : kg(item.weight_grams));
   }
   if (item.variant) details.push(item.variant.name);
   for (const modifier of item.modifiers || []) details.push(`+ ${modifier.name}${modifier.price ? ` (${money(modifier.price)})` : ""}`);

@@ -239,20 +239,27 @@ _STORE_CATALOGS: dict[int, Catalog] = {}
 
 WEIGHTED_PRICE_PER_KG = Decimal("95")
 WEIGHTED_MIN_GRAMS = 200
-WEIGHTED_MAX_GRAMS = 3000
+WEIGHTED_MAX_GRAMS = 11000
 WEIGHTED_MIN_AMOUNT = 20
 WEIGHTED_MAX_AMOUNT = 300
 # Quick-choice weights in the product window; the customer can also enter any amount.
-WEIGHTED_PRESET_GRAMS = [500, 1000, 1500, 2000]
+WEIGHTED_PRESET_GRAMS = [200, 500, 1000, 1500]
 WEIGHTED_DEFAULT_GRAMS = 1000
 STRIP_AND_WING_TERMS = ("стрипс", "крылыш")
 EXCLUDED_CATEGORIES = {"горячие напитки", "прочие", "прочее", "мороженое"}
 
 
 def price_for_grams(grams: int) -> Decimal:
-    return (Decimal(grams) * WEIGHTED_PRICE_PER_KG / Decimal("1000")).quantize(
+    # A portion costs at least the minimum amount: 0,2 kg is 20 somoni, not 19.
+    price = (Decimal(grams) * WEIGHTED_PRICE_PER_KG / Decimal("1000")).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
+    return max(price, Decimal(WEIGHTED_MIN_AMOUNT))
+
+
+def format_kg(grams: int) -> str:
+    """Weights are shown in kilograms: 200 -> "0,2", 1052 -> "1,052"."""
+    return f"{grams / 1000:.3f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
 def grams_for_amount(amount: int) -> int:
@@ -763,9 +770,7 @@ def format_receipt_money(amount: float) -> str:
 
 
 def format_receipt_grams(grams: int) -> str:
-    if grams >= 1000 and grams % 100 == 0:
-        return f"{grams / 1000:g} кг".replace(".", ",")
-    return f"{grams} г"
+    return f"{format_kg(grams)} кг"
 
 
 def _receipt_line(
@@ -1199,7 +1204,7 @@ def resolve_order_items(
             if not pricing.min_grams <= line.portion_value <= pricing.max_grams:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Вес порции — от {pricing.min_grams} г до {pricing.max_grams // 1000} кг.",
+                    detail=f"Вес порции — от {format_kg(pricing.min_grams)} до {format_kg(pricing.max_grams)} кг.",
                 )
             portion = {
                 "kind": "weight",

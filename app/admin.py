@@ -1022,7 +1022,7 @@ def download_admin_report(
             "Единица",
             "Цена за единицу",
             "Сумма порции",
-            "Вес порции (г)",
+            "Вес порции (кг)",
             "Сумма позиции",
             "Комментарий к заказу",
             "Оплата",
@@ -1047,7 +1047,7 @@ def download_admin_report(
                     item.get("unit", "шт."),
                     item["unit_price"],
                     item.get("portion_amount") or "",
-                    item.get("weight_grams") or "",
+                    item["weight_grams"] / 1000 if item.get("weight_grams") else "",
                     item["unit_price"] * item["quantity"],
                     order["comment"],
                     core.PAYMENT_STATUS_LABELS.get(order["payment_status"], order["payment_status"])

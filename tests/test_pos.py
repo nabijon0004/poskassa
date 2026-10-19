@@ -315,3 +315,16 @@ def test_shift_closes_without_counted_cash_when_cashier_logs_out(client):
     assert client.get("/api/pos/session", headers=headers).json()["shift"] is None
     shifts = client.get("/api/admin/shifts", headers=ADMIN).json()
     assert shifts[0]["open"] is False and shifts[0]["counted_cash"] is None
+
+
+def test_register_sells_weighted_portions_up_to_11_kg(client):
+    add_cashier(client)
+    headers = login(client)
+    open_shift(client, headers)
+    portion = {"product_id": "1", "quantity": 1, "portion_kind": "weight"}
+    heaviest = sell(client, headers, {"items": [{**portion, "portion_value": 11000}], "payment_method": "card"})
+    assert heaviest.status_code == 201, heaviest.text
+    assert heaviest.json()["total"] == 1045
+    too_heavy = sell(client, headers, {"items": [{**portion, "portion_value": 11001}], "payment_method": "card"})
+    assert too_heavy.status_code == 422
+    assert "11 кг" in too_heavy.json()["detail"]

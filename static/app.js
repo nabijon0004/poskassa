@@ -140,10 +140,8 @@ function productBasePrice(product) {
 }
 
 function formatGrams(grams) {
-  // Whole hundreds of grams from 1 kg are shown in kilograms: 1500 -> "1,5 кг".
-  return grams >= 1000 && grams % 100 === 0
-    ? `${(grams / 1000).toLocaleString(numberLocale())} ${t("weight.kg")}`
-    : `${grams} ${t("weight.g")}`;
+  // Weights are shown in kilograms: 200 -> "0,2 кг", 1052 -> "1,052 кг".
+  return `${(grams / 1000).toLocaleString(numberLocale(), { maximumFractionDigits: 3 })} ${t("weight.kg")}`;
 }
 
 function weightedPortion(pricing, kind, value) {
@@ -152,7 +150,8 @@ function weightedPortion(pricing, kind, value) {
     if (value < pricing.min_grams || value > pricing.max_grams) return null;
     return {
       kind, value, weight_grams: value,
-      amount_somoni: Math.round(value * pricing.price_per_kg / 10) / 100,
+      // At least the minimum amount: 0,2 kg costs 20 somoni (same rule as the server).
+      amount_somoni: Math.max(Math.round(value * pricing.price_per_kg / 10) / 100, pricing.min_amount),
     };
   }
   if (value < pricing.min_amount || value > pricing.max_amount) return null;
