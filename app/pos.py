@@ -23,7 +23,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 import app.main as core
-from app import queue_screen, stores
+from app import queue_screen, stores, telegram
 
 router = APIRouter()
 
@@ -551,17 +551,23 @@ def open_shift(payload: OpenShiftInput, x_pos_token: PosToken = None) -> dict[st
         if current_shift(connection, context.register_id) is not None:
             connection.rollback()
             raise HTTPException(status_code=409, detail="Смена уже открыта.")
-        connection.execute(
+        opened_at = now_iso()
+        cursor = connection.execute(
             """
             INSERT INTO shifts (cashier_id, opened_at, opening_cash, store_id, register_id)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
-                context.cashier["id"], now_iso(), money(payload.opening_cash),
+                context.cashier["id"], opened_at, money(payload.opening_cash),
                 context.store_id, context.register_id,
             ),
         )
         connection.commit()
+    telegram.notify_shift_opened(
+        store_name=context.store_name, register_name=context.register_name,
+        cashier_name=context.cashier["name"], shift_id=cursor.lastrowid,
+        opened_at=opened_at, opening_cash=money(payload.opening_cash),
+    )
     return session_state(context)
 
 
@@ -606,6 +612,7 @@ def close_shift(payload: CloseShiftInput, x_pos_token: PosToken = None) -> dict[
             (json.dumps(report, ensure_ascii=False), shift["id"]),
         )
         connection.commit()
+    telegram.notify_shift_closed(context.store_name, report)
     report["print_status"] = (
         try_print(shift_report_lines(report, "Z-ОТЧЁТ"), context.store_id, "Z-отчёт")
         if payload.print_report

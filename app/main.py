@@ -1382,11 +1382,13 @@ def parse_idempotency_key(idempotency_key: str | None) -> str:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     initialize_db()
     refresh_catalog()
-    from app import admin, queue_screen
+    from app import admin, queue_screen, telegram
 
     admin.create_owner_from_environment()
     queue_server = queue_screen.start_server()
+    telegram.start_bot()
     yield
+    telegram.stop_bot()
     if queue_server is not None:
         await queue_screen.stop_server(*queue_server)
 

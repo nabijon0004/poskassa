@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 import app.main as core
-from app import pos, stores
+from app import pos, stores, telegram
 
 router = APIRouter()
 
@@ -134,7 +134,12 @@ def apply_open_shift(register: stores.Device, operation: OpenShiftOperation) -> 
             ),
         )
         connection.commit()
-        return {"shift_id": cursor.lastrowid}
+    telegram.notify_shift_opened(
+        store_name=register.store_name, register_name=register.name, cashier_name=cashier["name"],
+        shift_id=cursor.lastrowid, opened_at=operation_time(operation.at),
+        opening_cash=pos.money(operation.opening_cash), offline=True,
+    )
+    return {"shift_id": cursor.lastrowid}
 
 
 def apply_sale(register: stores.Device, operation: SaleOperation) -> dict[str, Any]:
