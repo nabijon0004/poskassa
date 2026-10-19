@@ -1,0 +1,6 @@
+# Windows 7 build (build_win7.bat): Python 3.8 is the last Python for Windows 7,
+# these are versions that still support it and were checked with WebView2 Runtime 109.
+pywebview==6.2.1
+pythonnet==3.0.5
+pyinstaller==6.22.3
+pillow==10.4.0

@@ -11,3 +11,7 @@ desktop/pos-config.json
 desktop/pos-app.log
 desktop/webview-data/
 desktop/dist-new/
+desktop/pos-cloud-config.json
+desktop/pos-cloud-app.log
+desktop/webview-data-*/
+desktop/.venv-win7/

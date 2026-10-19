@@ -7,6 +7,9 @@ Settings live in pos-config.json next to the program:
     {"server_url": "https://paprika.example.com", "device_key": "...", "fullscreen": false}
 
 Keys: F11 — full screen, F5 — reload, Ctrl+Shift+S — server address and register key.
+
+pos_cloud.py builds a second program with the cloud server address built in: it asks
+only for the register key and keeps its own settings, log and browser data.
 """
 from __future__ import annotations
 
@@ -32,13 +35,9 @@ PRINT_POLL_SECONDS = 2
 # Next to PaprikaPOS.exe when packaged, next to this script otherwise.
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 CONFIG_PATH = APP_DIR / "pos-config.json"
+# Set by pos_cloud.py: the server address is fixed and not asked for.
+PRESET_SERVER_URL: str | None = None
 
-logging.basicConfig(
-    filename=APP_DIR / "pos-app.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    encoding="utf-8",
-)
 log = logging.getLogger("paprika-pos")
 
 # Hotkeys added to every page, including the server's /pos page.
@@ -104,6 +103,7 @@ def device_kind(server_url: str, key: str) -> str | None:
 
 
 def settings_page(server_url: str, message: str, device_key: str = "") -> str:
+    readonly = " readonly" if PRESET_SERVER_URL else ""
     return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><title>{APP_TITLE}</title>
 <style>
@@ -123,7 +123,7 @@ def settings_page(server_url: str, message: str, device_key: str = "") -> str:
 <body><div class="card">
   <h1>Paprika · Касса</h1>
   <p>{escape(message)}</p>
-  <label>Адрес сервера<input id="url" value="{escape(server_url)}" placeholder="https://paprika.example.com"></label>
+  <label>Адрес сервера<input id="url" value="{escape(server_url)}"{readonly} placeholder="https://paprika.example.com"></label>
   <label style="margin-top:12px">Ключ кассы<input id="key" value="{escape(device_key)}" placeholder="Из админпанели: точка → Устройства" autocomplete="off"></label>
   <button id="connect">Подключиться</button>
   <p id="error"></p>
@@ -157,7 +157,7 @@ class Api:
 
     def connect(self, url: str, key: str = "") -> str:
         try:
-            server_url = normalize_url(url)
+            server_url = PRESET_SERVER_URL or normalize_url(url)
         except ValueError as exc:
             return str(exc)
         if not server_is_up(server_url):
@@ -177,11 +177,13 @@ class Api:
 
     def show_settings(self) -> None:
         self._window.load_html(
-            settings_page(self.config["server_url"], "Укажите адрес сервера и ключ кассы.", self.config.get("device_key", ""))
+            settings_page(self.config["server_url"], "Укажите ключ кассы." if PRESET_SERVER_URL else "Укажите адрес сервера и ключ кассы.", self.config.get("device_key", ""))
         )
 
     def toggle_fullscreen(self) -> None:
         self._window.toggle_fullscreen()
+        self.config["fullscreen"] = not self.config.get("fullscreen", False)
+        save_config(self.config)
 
     def print_raw(self, host: str, port: int, timeout: float, data: str) -> str:
         """Print a receipt made by the page itself (offline mode); returns an error text or ""."""
@@ -192,8 +194,6 @@ class Api:
             return f"нет связи с принтером {host}:{port}"
         log.info("Printed an offline receipt")
         return ""
-        self.config["fullscreen"] = not self.config.get("fullscreen", False)
-        save_config(self.config)
 
 
 def register_url(server_url: str, key: str) -> str:
@@ -258,8 +258,22 @@ class PrintAgent(threading.Thread):
             time.sleep(PRINT_POLL_SECONDS)
 
 
-def main() -> None:
+def main(preset_server_url: str | None = None, name: str = "pos") -> None:
+    """name prefixes the settings, log and browser data files next to the program."""
+    global CONFIG_PATH, PRESET_SERVER_URL
+    CONFIG_PATH = APP_DIR / f"{name}-config.json"
+    # A handler, not basicConfig(encoding=...): that needs Python 3.9, the Windows 7 build uses 3.8.
+    logging.basicConfig(
+        handlers=[logging.FileHandler(APP_DIR / f"{name}-app.log", encoding="utf-8")],
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
     config = load_config()
+    if preset_server_url:
+        PRESET_SERVER_URL = normalize_url(preset_server_url)
+        if config.get("server_url") != PRESET_SERVER_URL:
+            config["server_url"] = PRESET_SERVER_URL
+            save_config(config)
     api = Api(config)
     try:
         server_url = normalize_url(config["server_url"])
@@ -270,7 +284,7 @@ def main() -> None:
     # With a register key the page opens even without internet: it is kept on this computer
     # since the last online start, and sales are queued until the connection returns.
     ready = bool(key)
-    message = "Укажите адрес сервера и ключ кассы из админпанели."
+    message = "Укажите ключ кассы из админпанели." if PRESET_SERVER_URL else "Укажите адрес сервера и ключ кассы из админпанели."
     window = webview.create_window(
         APP_TITLE,
         url=register_url(server_url, key) if ready else None,
@@ -290,7 +304,7 @@ def main() -> None:
     webview.start(
         gui="edgechromium",
         private_mode=False,
-        storage_path=str(APP_DIR / "webview-data"),
+        storage_path=str(APP_DIR / ("webview-data" if name == "pos" else f"webview-data-{name}")),
     )
 
 
