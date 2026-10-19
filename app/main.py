@@ -35,7 +35,7 @@ CURRENCY = os.getenv("KIOSK_CURRENCY", "с")
 # Larger orders must be placed at the cash desk.
 MAX_ORDER_TOTAL = Decimal(os.getenv("KIOSK_MAX_ORDER_TOTAL", "1000"))
 # Customer-facing order numbers run 1..ORDER_NUMBER_MAX and then start again from 1.
-ORDER_NUMBER_MAX = int(os.getenv("KIOSK_ORDER_NUMBER_MAX", "50"))
+ORDER_NUMBER_MAX = int(os.getenv("KIOSK_ORDER_NUMBER_MAX", "30"))
 # Title printed at the top of customer receipts from the cash register.
 RECEIPT_TITLE = os.getenv("KIOSK_RECEIPT_TITLE", "PAPRIKA")
 PRINTER_HOST = os.getenv("KIOSK_PRINTER_HOST", "").strip()

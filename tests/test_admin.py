@@ -21,7 +21,7 @@ def add_cashier(client, store_id, name, pin, headers=ADMIN):
     response = client.post(
         f"/api/admin/stores/{store_id}/cashiers",
         headers=headers,
-        json={"name": name, "pin": pin, "can_manage_shift": True},
+        json={"name": name, "pin": pin, "can_view_revenue": True},
     )
     assert response.status_code == 201, response.text
     return response.json()

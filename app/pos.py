@@ -48,7 +48,7 @@ class CashierCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=60)
     pin: str = Field(pattern=PIN_PATTERN)
-    can_manage_shift: bool = False
+    can_view_revenue: bool = False
 
     @field_validator("name")
     @classmethod
@@ -65,7 +65,7 @@ class CashierUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=60)
     pin: str | None = Field(default=None, pattern=PIN_PATTERN)
     active: bool | None = None
-    can_manage_shift: bool | None = None
+    can_view_revenue: bool | None = None
 
 
 class LoginInput(BaseModel):
@@ -145,18 +145,23 @@ def initialize_pos_tables(connection: sqlite3.Connection, default_store_id: int)
         )
         """
     )
-    # Opening/closing shifts and X/Z reports need access granted by the admin.
-    # Cashiers who existed before this setting keep the access they had.
+    # Every cashier opens and closes shifts; seeing the revenue and the cash (shift
+    # totals, X/Z reports) needs revenue access granted by the admin.
+    # can_manage_shift is a former setting, kept only to migrate older databases.
     added = add_missing_columns(
         connection,
         "cashiers",
         {
             "can_manage_shift": "INTEGER NOT NULL DEFAULT 0",
             "store_id": f"INTEGER NOT NULL DEFAULT {default_store_id}",
+            "can_view_revenue": "INTEGER NOT NULL DEFAULT 0",
         },
     )
     if "can_manage_shift" in added:
         connection.execute("UPDATE cashiers SET can_manage_shift = 1")
+    if "can_view_revenue" in added:
+        # Shift access used to include the totals: those cashiers keep seeing them.
+        connection.execute("UPDATE cashiers SET can_view_revenue = can_manage_shift")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS shifts (
@@ -225,7 +230,7 @@ def public_cashier(row: sqlite3.Row) -> dict[str, Any]:
         "store_id": row["store_id"],
         "name": row["name"],
         "active": bool(row["active"]),
-        "can_manage_shift": bool(row["can_manage_shift"]),
+        "can_view_revenue": bool(row["can_view_revenue"]),
     }
 
 
@@ -310,9 +315,22 @@ def require_cashier(token: str | None) -> PosContext:
     return PosContext(cashier, register["id"], register["name"], register["store_id"], register["store_name"])
 
 
-def require_shift_access(context: PosContext) -> None:
-    if not context.cashier["can_manage_shift"]:
-        raise HTTPException(status_code=403, detail="Нет доступа к смене. Обратитесь к администратору.")
+def require_revenue_access(context: PosContext) -> None:
+    if not context.cashier["can_view_revenue"]:
+        raise HTTPException(status_code=403, detail="Нет доступа к выручке. Обратитесь к администратору.")
+
+
+# Shift report fields a cashier without revenue access may see.
+SHIFT_FIELDS_WITHOUT_REVENUE = (
+    "shift_id", "store_id", "register_id", "register_name", "cashier_name", "closed_by_name",
+    "opened_at", "closed_at", "sales_count", "refunds_count",
+)
+
+
+def visible_shift_report(report: dict[str, Any], context: PosContext) -> dict[str, Any]:
+    if context.cashier["can_view_revenue"]:
+        return {**report, "revenue_hidden": False}
+    return {**{key: report[key] for key in SHIFT_FIELDS_WITHOUT_REVENUE}, "revenue_hidden": True}
 
 
 def require_open_shift(connection: sqlite3.Connection, context: PosContext) -> sqlite3.Row:
@@ -545,7 +563,6 @@ def try_print(lines: list[dict[str, Any]], store_id: int, title: str) -> str:
 @router.post("/api/pos/shifts/open")
 def open_shift(payload: OpenShiftInput, x_pos_token: PosToken = None) -> dict[str, Any]:
     context = require_cashier(x_pos_token)
-    require_shift_access(context)
     with closing(core.connect_db()) as connection:
         connection.execute("BEGIN IMMEDIATE")
         if current_shift(connection, context.register_id) is not None:
@@ -574,15 +591,14 @@ def open_shift(payload: OpenShiftInput, x_pos_token: PosToken = None) -> dict[st
 @router.get("/api/pos/shifts/current")
 def current_shift_report(x_pos_token: PosToken = None) -> dict[str, Any]:
     context = require_cashier(x_pos_token)
-    require_shift_access(context)
     with closing(core.connect_db()) as connection:
-        return shift_report(connection, require_open_shift(connection, context))
+        return visible_shift_report(shift_report(connection, require_open_shift(connection, context)), context)
 
 
 @router.post("/api/pos/shifts/current/print")
 def print_x_report(x_pos_token: PosToken = None) -> dict[str, Any]:
     context = require_cashier(x_pos_token)
-    require_shift_access(context)
+    require_revenue_access(context)
     with closing(core.connect_db()) as connection:
         report = shift_report(connection, require_open_shift(connection, context))
     return {"print_status": try_print(shift_report_lines(report, "X-ОТЧЁТ"), context.store_id, "X-отчёт")}
@@ -591,7 +607,9 @@ def print_x_report(x_pos_token: PosToken = None) -> dict[str, Any]:
 @router.post("/api/pos/shifts/close")
 def close_shift(payload: CloseShiftInput, x_pos_token: PosToken = None) -> dict[str, Any]:
     context = require_cashier(x_pos_token)
-    require_shift_access(context)
+    # The Z-report shows the revenue, so only cashiers with revenue access print it.
+    if payload.print_report:
+        require_revenue_access(context)
     with closing(core.connect_db()) as connection:
         connection.execute("BEGIN IMMEDIATE")
         shift = current_shift(connection, context.register_id)
@@ -613,12 +631,12 @@ def close_shift(payload: CloseShiftInput, x_pos_token: PosToken = None) -> dict[
         )
         connection.commit()
     telegram.notify_shift_closed(context.store_name, report)
-    report["print_status"] = (
+    print_status = (
         try_print(shift_report_lines(report, "Z-ОТЧЁТ"), context.store_id, "Z-отчёт")
         if payload.print_report
         else "not_requested"
     )
-    return report
+    return {**visible_shift_report(report, context), "print_status": print_status}
 
 
 # --- sales -----------------------------------------------------------------------
@@ -817,14 +835,32 @@ def refund_order(order_ref: str, x_pos_token: PosToken = None) -> dict[str, Any]
         return pos_order(connection, load_order(connection, context, order_ref))
 
 
-@router.post("/api/pos/orders/{order_ref}/receipt")
-def reprint_receipt(order_ref: str, x_pos_token: PosToken = None) -> dict[str, Any]:
-    context = require_cashier(x_pos_token)
+def paid_order(context: PosContext, order_ref: str) -> dict[str, Any]:
     with closing(core.connect_db()) as connection:
         row = load_order(connection, context, order_ref)
         if row["payment_status"] != "paid":
             raise HTTPException(status_code=409, detail="Чек печатается только для оплаченного заказа.")
-        order = pos_order(connection, row)
+        return pos_order(connection, row)
+
+
+@router.get("/api/pos/orders/{order_ref}/receipt")
+def show_receipt(order_ref: str, x_pos_token: PosToken = None) -> dict[str, Any]:
+    """The customer receipt as it is printed, to show it on the screen."""
+    context = require_cashier(x_pos_token)
+    order = paid_order(context, order_ref)
+    settings = core.load_printer_settings(context.store_id)
+    return {
+        "order_ref": order["order_ref"],
+        "order_number": order["order_number"],
+        "chars_per_line": settings.chars_per_line,
+        "lines": core.build_customer_receipt(order, settings, cashier_name=order["cashier_name"]),
+    }
+
+
+@router.post("/api/pos/orders/{order_ref}/receipt")
+def reprint_receipt(order_ref: str, x_pos_token: PosToken = None) -> dict[str, Any]:
+    context = require_cashier(x_pos_token)
+    order = paid_order(context, order_ref)
     status = print_customer_receipt(order, order["cashier_name"], context.store_id)
     if status == "failed":
         raise HTTPException(status_code=503, detail="Не удалось напечатать чек.")

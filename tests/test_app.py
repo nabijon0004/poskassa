@@ -764,10 +764,10 @@ def test_tajik_letters_in_comment_print_as_closest_russian(client, monkeypatch):
     assert b"?" not in sent[0]
 
 
-def test_order_numbers_run_from_1_to_50_and_restart(client, monkeypatch):
+def test_order_numbers_run_from_1_to_30_and_restart(client, monkeypatch):
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
     numbers, refs, sent = [], [], []
-    for _ in range(52):
+    for _ in range(32):
         response = client.post(
             "/api/orders",
             headers={"Idempotency-Key": str(uuid.uuid4())},
@@ -778,16 +778,16 @@ def test_order_numbers_run_from_1_to_50_and_restart(client, monkeypatch):
         refs.append(response.json()["order_ref"])
         sent.extend(take_print_jobs(client)[1])
 
-    assert numbers == [str(number) for number in range(1, 51)] + ["1", "2"]
-    assert len(set(refs)) == 52
-    assert refs[50] == "P-00051"
-    assert b"\x1d!\x1150\n" in sent[49]
-    assert b"\x1d!\x111\n" in sent[50]
+    assert numbers == [str(number) for number in range(1, 31)] + ["1", "2"]
+    assert len(set(refs)) == 32
+    assert refs[30] == "P-00031"
+    assert b"\x1d!\x1130\n" in sent[29]
+    assert b"\x1d!\x111\n" in sent[30]
 
     headers = {"Authorization": "Bearer test-staff-secret"}
     reprinted = client.post("/api/admin/stores/1/print", headers=headers, json={"order_ref": refs[0]})
     assert reprinted.json()["order_number"] == "1"
     assert reprinted.json()["order_ref"] == "P-00001"
     exported = client.get("/api/admin/report.csv", headers=headers).text
-    assert ";1;P-00051;" in exported
-    assert ";50;P-00050;" in exported
+    assert ";1;P-00031;" in exported
+    assert ";30;P-00030;" in exported

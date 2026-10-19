@@ -8,11 +8,11 @@ def use_printer(monkeypatch):
     monkeypatch.setattr(main, "PRINTER_HOST", "printer.example")
 
 
-def add_cashier(client, name="Алия", pin="1234", can_manage_shift=True):
+def add_cashier(client, name="Алия", pin="1234", can_view_revenue=True):
     response = client.post(
         "/api/admin/stores/1/cashiers",
         headers=ADMIN,
-        json={"name": name, "pin": pin, "can_manage_shift": can_manage_shift},
+        json={"name": name, "pin": pin, "can_view_revenue": can_view_revenue},
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -51,7 +51,7 @@ def kiosk_order(client, items):
 def test_cashiers_are_managed_by_staff_and_log_in_by_pin(client):
     assert client.get("/api/admin/stores/1/cashiers").status_code == 401
     cashier = add_cashier(client)
-    assert cashier == {"id": cashier["id"], "store_id": 1, "name": "Алия", "active": True, "can_manage_shift": True}
+    assert cashier == {"id": cashier["id"], "store_id": 1, "name": "Алия", "active": True, "can_view_revenue": True}
     assert client.post("/api/admin/stores/1/cashiers", headers=ADMIN, json={"name": "Б", "pin": "1234"}).status_code == 409
     assert client.post("/api/admin/stores/1/cashiers", headers=ADMIN, json={"name": "Б", "pin": "12"}).status_code == 422
 
@@ -233,6 +233,29 @@ def test_receipt_reprint_requires_paid_order(client, monkeypatch):
     assert "Оплата картой".encode("cp866") in take_print_jobs(client)[1][0]
 
 
+def test_receipt_is_shown_without_printing(client, monkeypatch):
+    use_printer(monkeypatch)
+    add_cashier(client)
+    headers = login(client)
+    open_shift(client, headers)
+    unpaid = kiosk_order(client, [{"product_id": "4", "quantity": 1}])
+    take_print_jobs(client)
+    assert client.get(f"/api/pos/orders/{unpaid['order_ref']}/receipt", headers=headers).status_code == 409
+    sale = sell(client, headers, {"items": [{"product_id": "4", "quantity": 2}], "payment_method": "card", "print_receipt": False})
+    take_print_jobs(client)
+
+    shown = client.get(f"/api/pos/orders/{sale.json()['order_ref']}/receipt", headers=headers)
+    assert shown.status_code == 200, shown.text
+    receipt = shown.json()
+    assert receipt["order_number"] == sale.json()["order_number"]
+    assert receipt["chars_per_line"] > 0
+    texts = [line["text"] for line in receipt["lines"]]
+    assert "ТОВАРНЫЙ ЧЕК" in texts
+    assert any(text.startswith("Оплата картой") for text in texts)
+    assert take_print_jobs(client)[1] == []
+    assert client.get(f"/api/pos/orders/{sale.json()['order_ref']}/receipt").status_code == 401
+
+
 def test_pos_page_is_served(client):
     response = client.get("/pos")
     assert response.status_code == 200
@@ -256,31 +279,26 @@ def test_receipts_tab_lists_only_the_latest_15(client):
     assert [order["order_ref"] for order in recent] == list(reversed(refs))[:15]
 
 
-def test_shift_needs_access_granted_by_admin(client):
-    manager = add_cashier(client, "Алия", "1234")
-    cashier = add_cashier(client, "Бахром", "5678", can_manage_shift=False)
-    assert cashier["can_manage_shift"] is False
+def test_every_cashier_manages_shifts_and_revenue_access_works_at_once(client):
+    add_cashier(client, "Алия", "1234")
+    cashier = add_cashier(client, "Бахром", "5678", can_view_revenue=False)
     headers = login(client, "5678")
-    assert client.get("/api/pos/session", headers=headers).json()["cashier"]["can_manage_shift"] is False
+    open_shift(client, headers, "0")
+    assert client.get("/api/pos/shifts/current", headers=headers).json()["revenue_hidden"] is True
+    assert client.put(
+        f"/api/admin/stores/1/cashiers/{cashier['id']}", headers=ADMIN, json={"can_manage_shift": False}
+    ).status_code == 422
 
-    denied = client.post("/api/pos/shifts/open", headers=headers, json={"opening_cash": "0"})
-    assert denied.status_code == 403
-    assert "доступа к смене" in denied.json()["detail"]
+    # Revenue access granted by the admin works at once, without logging in again.
+    granted = client.put(f"/api/admin/stores/1/cashiers/{cashier['id']}", headers=ADMIN, json={"can_view_revenue": True})
+    assert granted.json()["can_view_revenue"] is True
+    report = client.get("/api/pos/shifts/current", headers=headers).json()
+    assert report["revenue_hidden"] is False and report["expected_cash"] == 0
 
-    # A cashier with access opens the shift; the other one can sell but not see or close the shift.
-    open_shift(client, login(client, "1234"), "0")
-    sale = sell(client, headers, {"items": [{"product_id": "4", "quantity": 1}], "payment_method": "card"})
-    assert sale.status_code == 201, sale.text
-    assert client.get("/api/pos/shifts/current", headers=headers).status_code == 403
-    assert client.post("/api/pos/shifts/current/print", headers=headers).status_code == 403
-    assert client.post("/api/pos/shifts/close", headers=headers, json={"counted_cash": "0"}).status_code == 403
-
-    # Access granted by the admin works at once, without logging in again.
-    granted = client.put(f"/api/admin/stores/1/cashiers/{cashier['id']}", headers=ADMIN, json={"can_manage_shift": True})
-    assert granted.json()["can_manage_shift"] is True
-    assert client.get("/api/pos/shifts/current", headers=headers).status_code == 200
-    revoked = client.put(f"/api/admin/stores/1/cashiers/{manager['id']}", headers=ADMIN, json={"can_manage_shift": False})
-    assert revoked.json()["can_manage_shift"] is False
+    # Logging out closes the shift without counting the cash.
+    closed = client.post("/api/pos/shifts/close", headers=headers, json={"print_report": False})
+    assert closed.status_code == 200, closed.text
+    assert client.get("/api/pos/session", headers=headers).json()["shift"] is None
 
 
 def test_existing_cashiers_keep_shift_access_after_upgrade(tmp_path, monkeypatch):
@@ -296,7 +314,61 @@ def test_existing_cashiers_keep_shift_access_after_upgrade(tmp_path, monkeypatch
     monkeypatch.setattr(main, "DB_PATH", database)
     main.initialize_db()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT can_manage_shift FROM cashiers").fetchone()[0] == 1
+        assert connection.execute("SELECT can_view_revenue FROM cashiers").fetchone()[0] == 1
+
+
+def test_cashiers_without_shift_access_keep_revenue_hidden_after_upgrade(tmp_path, monkeypatch):
+    import sqlite3
+
+    database = tmp_path / "old.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE cashiers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+            "pin_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, "
+            "can_manage_shift INTEGER NOT NULL DEFAULT 0)"
+        )
+        connection.execute("INSERT INTO cashiers (name, pin_hash, created_at, can_manage_shift) VALUES ('С', 'x', 'now', 1)")
+        connection.execute("INSERT INTO cashiers (name, pin_hash, created_at, can_manage_shift) VALUES ('Б', 'x', 'now', 0)")
+    monkeypatch.setattr(main, "DB_PATH", database)
+    main.initialize_db()
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT can_view_revenue FROM cashiers ORDER BY id").fetchall()
+    assert rows == [(1,), (0,)]
+
+
+def test_new_cashiers_do_not_get_revenue_access_by_default(client):
+    created = client.post("/api/admin/stores/1/cashiers", headers=ADMIN, json={"name": "Вера", "pin": "4321"})
+    assert created.status_code == 201, created.text
+    assert created.json()["can_view_revenue"] is False
+
+
+def test_cashier_without_revenue_access_controls_shift_blind(client, monkeypatch):
+    use_printer(monkeypatch)
+    add_cashier(client, "Вера", "4321", can_view_revenue=False)
+    headers = login(client, "4321")
+    assert client.get("/api/pos/session", headers=headers).json()["cashier"]["can_view_revenue"] is False
+    open_shift(client, headers, "100")
+    sale = sell(client, headers, {"items": [{"product_id": "4", "quantity": 1}], "payment_method": "cash"})
+    assert sale.status_code == 201, sale.text
+
+    report = client.get("/api/pos/shifts/current", headers=headers)
+    assert report.status_code == 200, report.text
+    report = report.json()
+    assert report["revenue_hidden"] is True and report["sales_count"] == 1
+    for field in ("revenue", "sales_total", "sales_cash", "expected_cash", "opening_cash", "counted_cash"):
+        assert field not in report
+    denied = client.post("/api/pos/shifts/current/print", headers=headers)
+    assert denied.status_code == 403 and "выручке" in denied.json()["detail"]
+    assert client.post("/api/pos/shifts/close", headers=headers, json={"counted_cash": "113"}).status_code == 403
+    take_print_jobs(client)
+
+    # Closes with a blind cash count and without the Z-report; the admin still sees everything.
+    closed = client.post("/api/pos/shifts/close", headers=headers, json={"counted_cash": "110", "print_report": False})
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["revenue_hidden"] is True and "difference" not in closed.json()
+    assert take_print_jobs(client)[1] == []
+    shift = client.get("/api/admin/shifts", headers=ADMIN).json()[0]
+    assert shift["counted_cash"] == 110
 
 
 def test_shift_closes_without_counted_cash_when_cashier_logs_out(client):

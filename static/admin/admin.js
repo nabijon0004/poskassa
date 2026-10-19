@@ -490,21 +490,21 @@ async function renderCashiers(page, storeId) {
       <form id="cashierForm" class="form-grid">
         <label class="field">Имя<input name="name" maxlength="60" required placeholder="Например: Алия"></label>
         <label class="field">PIN-код<input name="pin" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" required placeholder="4–6 цифр" autocomplete="off"></label>
-        <label class="check"><input type="checkbox" name="can_manage_shift"> Доступ к смене</label>
+        <label class="check"><input type="checkbox" name="can_view_revenue"> Выручка</label>
         <button class="btn btn-primary" type="submit">Добавить</button>
       </form>
       <p class="message" id="cashierMessage"></p>
     </section>
     <section class="card">
       <h2>Кассиры</h2>
-      <p class="hint">Открывать и закрывать смену и печатать X/Z-отчёты могут только кассиры с доступом к смене.</p>
-      ${cashiers.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Имя</th><th>Статус</th><th>Доступ к смене</th><th></th></tr></thead><tbody>${cashiers.map((cashier) => `
+      <p class="hint">Открывать и закрывать смену могут все кассиры. «Выручка» — видеть выручку и наличные в кассе и печатать X/Z-отчёты.</p>
+      ${cashiers.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Имя</th><th>Статус</th><th>Выручка</th><th></th></tr></thead><tbody>${cashiers.map((cashier) => `
         <tr>
           <td><strong>${escapeHtml(cashier.name)}</strong></td>
           <td><span class="badge ${cashier.active ? "ok" : "off"}">${cashier.active ? "Активен" : "Отключён"}</span></td>
-          <td><span class="badge ${cashier.can_manage_shift ? "ok" : ""}">${cashier.can_manage_shift ? "Есть" : "Нет"}</span></td>
+          <td><span class="badge ${cashier.can_view_revenue ? "ok" : ""}">${cashier.can_view_revenue ? "Есть" : "Нет"}</span></td>
           <td class="actions">
-            <button class="btn btn-small" data-shift="${cashier.id}">${cashier.can_manage_shift ? "Забрать доступ к смене" : "Дать доступ к смене"}</button>
+            <button class="btn btn-small" data-revenue="${cashier.id}">${cashier.can_view_revenue ? "Забрать доступ к выручке" : "Дать доступ к выручке"}</button>
             <button class="btn btn-small" data-pin="${cashier.id}">Сменить PIN</button>
             <button class="btn btn-small ${cashier.active ? "btn-danger" : ""}" data-active="${cashier.id}">${cashier.active ? "Отключить" : "Включить"}</button>
           </td>
@@ -524,16 +524,16 @@ async function renderCashiers(page, storeId) {
     try {
       await api(`/api/admin/stores/${storeId}/cashiers`, {
         method: "POST",
-        body: { name: form.elements.name.value, pin: form.elements.pin.value, can_manage_shift: form.elements.can_manage_shift.checked },
+        body: { name: form.elements.name.value, pin: form.elements.pin.value, can_view_revenue: form.elements.can_view_revenue.checked },
       });
       showToast("Кассир добавлен");
       reload();
     } catch (error) { setMessage(page.querySelector("#cashierMessage"), error.message, true); }
   });
   const find = (id) => cashiers.find((cashier) => cashier.id === Number(id));
-  page.querySelectorAll("[data-shift]").forEach((button) => button.addEventListener("click", () => {
-    const cashier = find(button.dataset.shift);
-    update(cashier.id, { can_manage_shift: !cashier.can_manage_shift });
+  page.querySelectorAll("[data-revenue]").forEach((button) => button.addEventListener("click", () => {
+    const cashier = find(button.dataset.revenue);
+    update(cashier.id, { can_view_revenue: !cashier.can_view_revenue });
   }));
   page.querySelectorAll("[data-active]").forEach((button) => button.addEventListener("click", () => {
     const cashier = find(button.dataset.active);

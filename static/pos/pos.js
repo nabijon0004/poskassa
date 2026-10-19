@@ -238,7 +238,7 @@ function offlineShift() {
 
 function applyOfflineSession(cashier) {
   const data = offline.usableData();
-  state.cashier = { id: cashier.id, name: cashier.name, active: cashier.active, can_manage_shift: cashier.can_manage_shift };
+  state.cashier = { id: cashier.id, name: cashier.name, active: cashier.active, can_view_revenue: cashier.can_view_revenue };
   state.store = data.store;
   state.register = data.register;
   state.currency = data.currency || "с";
@@ -463,33 +463,7 @@ async function offlineLogin(pin, error) {
   await enterApp();
 }
 
-function renderNoShiftAccess() {
-  app.innerHTML = `
-    <div class="center-screen">
-      <div class="login-card">
-        <h1>Смена закрыта</h1>
-        <p>Кассир: <strong>${escapeHtml(state.cashier.name)}</strong>. У вас нет доступа к открытию смены — попросите сотрудника с доступом или администратора открыть смену.</p>
-        <button class="btn btn-primary btn-block" id="recheck">Проверить снова</button>
-        <button class="btn btn-ghost btn-block" id="logout" style="margin-top:6px">Выйти</button>
-        <p class="form-error" id="shiftError"></p>
-      </div>
-    </div>`;
-  app.querySelector("#logout").addEventListener("click", () => signOut());
-  app.querySelector("#recheck").addEventListener("click", async () => {
-    try {
-      applySession(await api("/api/pos/session"));
-      await enterApp();
-    } catch (exc) {
-      app.querySelector("#shiftError").textContent = exc.message;
-    }
-  });
-}
-
 function renderOpenShift() {
-  if (!state.cashier.can_manage_shift) {
-    renderNoShiftAccess();
-    return;
-  }
   let amount = "";
   app.innerHTML = `
     <div class="center-screen">
@@ -541,7 +515,7 @@ const TABS = [
   { id: "kiosk", label: "Заказы киоска" },
   { id: "kitchen", label: "Очередь" },
   { id: "history", label: "Чеки" },
-  { id: "shift", label: "Смена", access: "can_manage_shift" },
+  { id: "shift", label: "Смена" },
 ];
 
 function visibleTabs() {
@@ -577,9 +551,8 @@ function renderMain() {
 }
 
 // Logging out closes the open shift (without counting the cash and without showing the totals).
-// A cashier without shift access just logs out: the shift was opened by someone else.
 async function logOutAndCloseShift() {
-  if (!state.shift || !state.cashier.can_manage_shift) {
+  if (!state.shift) {
     signOut();
     return;
   }
@@ -1213,12 +1186,7 @@ async function renderHistory(body) {
         </tr>`).join("")}
       </tbody>
     </table>`;
-  table.querySelectorAll("[data-receipt]").forEach((button) => button.addEventListener("click", async () => {
-    try {
-      await api(`/api/pos/orders/${encodeURIComponent(button.dataset.receipt)}/receipt`, { method: "POST" });
-      showToast("Чек отправлен на принтер");
-    } catch (exc) { showToast(exc.message, true); }
-  }));
+  table.querySelectorAll("[data-receipt]").forEach((button) => button.addEventListener("click", () => openReceiptDialog(button.dataset.receipt)));
   table.querySelectorAll("[data-refund]").forEach((button) => button.addEventListener("click", async () => {
     const order = state.history.find((entry) => entry.order_ref === button.dataset.refund);
     const method = order.payment_method === "cash" ? "Верните клиенту наличные" : "Сделайте возврат на карту в терминале";
@@ -1231,10 +1199,53 @@ async function renderHistory(body) {
   }));
 }
 
+// The receipt is shown as the printer prints it; printing is up to the cashier.
+async function openReceiptDialog(orderRef) {
+  const path = `/api/pos/orders/${encodeURIComponent(orderRef)}/receipt`;
+  let receipt;
+  try {
+    receipt = await api(path);
+  } catch (exc) {
+    showToast(exc.message, true);
+    return;
+  }
+  const lines = receipt.lines.map((line) => {
+    const stretch = line.height / line.width;
+    const text = escapeHtml(line.text) || "&nbsp;";
+    return `<div class="receipt-line" style="text-align:${line.align};font-size:${line.width}em;${line.bold ? "font-weight:700;" : ""}">${stretch === 1 ? text : `<span style="display:inline-block;transform:scaleY(${stretch});margin:${(stretch - 1) / 2}em 0">${text}</span>`}</div>`;
+  }).join("");
+  const modal = openModal(`
+    <div class="modal-head"><h3>Чек № ${escapeHtml(receipt.order_number)}</h3><button class="modal-close" data-close>×</button></div>
+    <div class="receipt-preview"><div class="receipt-paper" style="width:${receipt.chars_per_line}ch">${lines}</div></div>
+    <div class="modal-actions"><button class="btn" data-close>Закрыть</button><button class="btn btn-primary" id="printReceipt">Печатать</button></div>`);
+  modal.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", closeModal));
+  const printButton = modal.querySelector("#printReceipt");
+  printButton.addEventListener("click", async () => {
+    printButton.disabled = true;
+    try {
+      await api(path, { method: "POST" });
+      showToast("Чек отправлен на принтер");
+      closeModal();
+    } catch (exc) {
+      showToast(exc.message, true);
+      printButton.disabled = false;
+    }
+  });
+}
+
 // --- shift -----------------------------------------------------------------------
 
 function reportTiles(report) {
   const tile = (label, value, highlight = false) => `<div class="report-tile ${highlight ? "highlight" : ""}"><span>${label}</span><strong>${value}</strong></div>`;
+  // Without revenue access the server sends only the counts.
+  if (report.revenue_hidden) {
+    return `
+    <div class="report-grid">
+      ${tile("Продаж", report.sales_count)}
+      ${tile("Возвратов", report.refunds_count)}
+    </div>
+    <p class="hint">Выручка и наличные видны только кассирам с доступом «Выручка».</p>`;
+  }
   return `
     <div class="report-grid">
       ${tile("Продаж", report.sales_count)}
@@ -1270,10 +1281,10 @@ async function renderShift(body) {
     <p class="order-meta" style="margin:0 0 14px">Смена № ${report.shift_id} · открыта ${formatDateTime(report.opened_at)} · кассир ${escapeHtml(report.cashier_name)}</p>
     ${reportTiles(report)}
     <div class="row-actions">
-      <button class="btn" id="printX">Печать X-отчёта</button>
-      <button class="btn btn-primary" id="closeShift">Закрыть смену (Z-отчёт)</button>
+      ${report.revenue_hidden ? "" : `<button class="btn" id="printX">Печать X-отчёта</button>`}
+      <button class="btn btn-primary" id="closeShift">${report.revenue_hidden ? "Закрыть смену" : "Закрыть смену (Z-отчёт)"}</button>
     </div>`;
-  container.querySelector("#printX").addEventListener("click", async () => {
+  container.querySelector("#printX")?.addEventListener("click", async () => {
     try {
       const result = await api("/api/pos/shifts/current/print", { method: "POST" });
       showToast(result.print_status === "failed" ? "Принтер не настроен" : "X-отчёт отправлен на печать", result.print_status === "failed");
@@ -1282,27 +1293,30 @@ async function renderShift(body) {
   container.querySelector("#closeShift").addEventListener("click", () => openCloseShiftDialog(report));
 }
 
+// Without revenue access the cashier counts the cash blind: no expected amount, no Z-report.
 function openCloseShiftDialog(report) {
+  const blind = report.revenue_hidden;
   let counted = "";
-  let printReport = true;
+  let printReport = !blind;
   const modal = openModal(`
     <div class="modal-head"><h3>Закрытие смены</h3><button class="modal-close" data-close>×</button></div>
-    <p>Пересчитайте наличные в кассе. По расчёту должно быть <strong>${money(report.expected_cash)}</strong>.</p>
+    <p>${blind ? "Пересчитайте наличные в кассе и введите сумму." : `Пересчитайте наличные в кассе. По расчёту должно быть <strong>${money(report.expected_cash)}</strong>.`}</p>
     ${state.kioskOrders.length ? `<p class="hint error">Неоплаченных заказов из киоска: ${state.kioskOrders.length}. Их можно оплатить или отменить и после закрытия, в новой смене.</p>` : ""}
     <div class="amount-display" id="countedValue"></div>
     <p class="hint" id="countedHint"></p>
     ${keypadHtml({ decimal: true })}
-    <label class="check-row"><input type="checkbox" id="printZ" checked> Печатать Z-отчёт</label>
+    ${blind ? "" : `<label class="check-row"><input type="checkbox" id="printZ" checked> Печатать Z-отчёт</label>`}
     <div class="modal-actions"><button class="btn" data-close>Отмена</button><button class="btn btn-primary" id="confirmClose">Закрыть смену</button></div>`);
   const draw = () => {
     modal.querySelector("#countedValue").textContent = `${counted || "0"} ${state.currency}`;
+    if (blind) return;
     const difference = round2(parseAmount(counted) - report.expected_cash);
     const hint = modal.querySelector("#countedHint");
     hint.classList.toggle("error", difference !== 0);
     hint.textContent = difference === 0 ? "Совпадает с расчётом" : `Расхождение: ${moneyText(difference)}`;
   };
   bindKeypad(modal, (key) => { counted = applyKey(counted, key, { decimal: true }); draw(); });
-  modal.querySelector("#printZ").addEventListener("change", (event) => { printReport = event.currentTarget.checked; });
+  modal.querySelector("#printZ")?.addEventListener("change", (event) => { printReport = event.currentTarget.checked; });
   modal.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", closeModal));
   modal.querySelector("#confirmClose").addEventListener("click", async () => {
     try {

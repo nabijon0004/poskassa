@@ -7,7 +7,7 @@
 const OFFLINE_DATA_KEY = "paprika-pos-offline-data";
 const OUTBOX_KEY = "paprika-pos-outbox";
 const OFFLINE_NUMBER_KEY = "paprika-pos-offline-number";
-const OFFLINE_NUMBER_MAX = 50;
+const OFFLINE_NUMBER_MAX = 30;
 
 const offline = {
   // --- local storage -----------------------------------------------------------------
@@ -63,7 +63,7 @@ const offline = {
 
   pendingSales() { return this.outbox.filter((operation) => operation.type === "sale"); },
 
-  // Offline orders are numbered О1..О50 so they never look like the server's numbers.
+  // Offline orders are numbered О1..О30 so they never look like the server's numbers.
   nextNumber() {
     const next = (Number(this.read(OFFLINE_NUMBER_KEY, 0)) % OFFLINE_NUMBER_MAX) + 1;
     this.write(OFFLINE_NUMBER_KEY, next);

@@ -540,10 +540,13 @@ def create_cashier(store_id: int, payload: pos.CashierCreate, authorization: Aut
             raise HTTPException(status_code=409, detail="Такой PIN-код уже используется в этой точке.")
         cursor = connection.execute(
             """
-            INSERT INTO cashiers (name, pin_hash, active, created_at, can_manage_shift, store_id)
+            INSERT INTO cashiers (name, pin_hash, active, created_at, can_view_revenue, store_id)
             VALUES (?, ?, 1, ?, ?, ?)
             """,
-            (payload.name, pos.hash_pin(payload.pin), now().isoformat(), int(payload.can_manage_shift), store_id),
+            (
+                payload.name, pos.hash_pin(payload.pin), now().isoformat(),
+                int(payload.can_view_revenue), store_id,
+            ),
         )
         connection.commit()
         return pos.public_cashier(load_store_cashier(connection, store_id, cursor.lastrowid))
@@ -565,8 +568,8 @@ def update_cashier(
             updates["pin_hash"] = pos.hash_pin(payload.pin)
         if payload.active is not None:
             updates["active"] = int(payload.active)
-        if payload.can_manage_shift is not None:
-            updates["can_manage_shift"] = int(payload.can_manage_shift)
+        if payload.can_view_revenue is not None:
+            updates["can_view_revenue"] = int(payload.can_view_revenue)
         if updates:
             assignments = ", ".join(f"{name} = ?" for name in updates)
             connection.execute(f"UPDATE cashiers SET {assignments} WHERE id = ?", (*updates.values(), cashier_id))

@@ -44,7 +44,7 @@ screen announces ready orders the same way. Product names and
 ingredients come from the catalog and stay as entered; the admin panel and the
 kitchen receipt are in Russian.
 
-Order numbers shown to customers and printed for the kitchen run from 1 to 50
+Order numbers shown to customers and printed for the kitchen run from 1 to 30
 (`KIOSK_ORDER_NUMBER_MAX`) in each store and then start again from 1. Each order
 also keeps a unique internal reference (`P-00051`) used in the admin panel,
 reprints and CSV exports.
@@ -98,7 +98,7 @@ For each store:
   new key or disabling a device stops the old one. The list shows when each
   device was last online.
 - **Сотрудники** — cashiers with a 4–6 digit PIN (unique within the store) and
-  **shift access** (open/close shifts, X/Z reports).
+  **revenue access** («Выручка»: shift totals, cash in the drawer, X/Z reports).
 - **Товары** — the shared menu from `tovar.xlsx` with the store's own changes:
   price, availability, photo, ingredients, priority, and products of its own.
   Pizzas, burgers, twisters and quesadillas start with a typical composition
@@ -118,7 +118,7 @@ sales of a shift.
 A database from the single-store version is migrated automatically on start:
 everything is moved to the store «Paprika» with the devices «Касса 1»,
 «Киоск 1» and «Экран очереди» (issue their keys in the admin panel), order
-numbering continues, and cashiers keep their shift access.
+numbering continues, and cashiers who had shift access get revenue access.
 
 ## Cash register (POS)
 
@@ -130,9 +130,10 @@ register for a while.
 
 - **Shift**: each register has its own shift — open with the cash in the
   drawer, X report at any time, close with the counted cash (Z report: sales by
-  cash/card, discounts, returns, expected cash and the difference). Only
-  cashiers with shift access see the **Смена** tab; a cashier without access
-  can sell once a shift is open.
+  cash/card, discounts, returns, expected cash and the difference). Every
+  cashier can open and close a shift; only cashiers with revenue access see the
+  totals and the expected cash and print X/Z reports, the others count the cash
+  blind. Logging out closes the open shift.
 - **Sale**: categories, search, product tiles, quantities, weighted portions
   (weight or amount), discount in percent or somoni, eat-in/takeaway. Payment
   by cash (amount received and change) or card. The kitchen ticket and a
@@ -159,7 +160,7 @@ The register keeps working when the connection to the server is lost:
   internet too — after at least one online start on that computer.
 - Without connection a cashier logs in by PIN (checked locally), may open a
   shift, and sells; each sale is saved on the computer, gets an offline number
-  `О1`…`О50`, and its kitchen ticket and customer receipt are printed directly
+  `О1`…`О30`, and its kitchen ticket and customer receipt are printed directly
   by `PaprikaPOS.exe` on the store printer. The header shows «Нет связи» and the
   number of sales not sent yet; they are listed on the **Чеки** tab.
 - Every 10 seconds the register checks the connection; when it is back, the
