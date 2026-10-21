@@ -68,3 +68,38 @@ def test_agent_needs_a_register_of_the_same_store(client, monkeypatch):
     assert len(job_id[1]) == 1
     foreign = client.post("/api/agent/print-jobs/1", headers={"X-Device-Key": other["key"]}, json={"status": "printed"})
     assert foreign.status_code == 404
+
+
+def test_a_windows_printer_is_printed_on_by_the_register_that_has_it(client):
+    second = client.post(
+        "/api/admin/stores/1/devices", headers=ADMIN, json={"kind": "register", "name": "Касса 2"}
+    ).json()
+    reported = client.put("/api/agent/printers", headers=REGISTER, json={"printers": ["XP-80C", " ", "XP-80C"]})
+    assert reported.status_code == 200, reported.text
+    client.put("/api/agent/printers", headers={"X-Device-Key": second["key"]}, json={"printers": ["Microsoft Print to PDF"]})
+    agents = client.get("/api/admin/stores/1/printer/status", headers=ADMIN).json()["agents"]
+    assert {agent["name"]: agent["printers"] for agent in agents}["Касса 2"] == ["Microsoft Print to PDF"]
+    assert ["XP-80C"] in [agent["printers"] for agent in agents]
+
+    settings = client.get("/api/admin/stores/1/printer", headers=ADMIN).json()
+    settings.update(connection_type="system", host="", system_name="XP-80C")
+    assert client.put("/api/admin/stores/1/printer", headers=ADMIN, json=settings).status_code == 200
+    assert client.get("/api/admin/stores/1/printer/status", headers=ADMIN).json()["configured"]
+    order(client)
+
+    # The register without this printer leaves the job to the one that has it.
+    assert take_print_jobs(client, key=second["key"])[1] == []
+    printer, jobs = take_print_jobs(client)
+    assert printer["connection_type"] == "system"
+    assert printer["system_name"] == "XP-80C"
+    assert len(jobs) == 1
+
+
+def test_a_windows_printer_must_be_chosen(client):
+    settings = client.get("/api/admin/stores/1/printer", headers=ADMIN).json()
+    settings.update(connection_type="system", host="printer.example", system_name="")
+    client.put("/api/admin/stores/1/printer", headers=ADMIN, json=settings)
+    assert not client.get("/api/admin/stores/1/printer/status", headers=ADMIN).json()["configured"]
+    assert client.post("/api/admin/stores/1/printer/test", headers=ADMIN, json=settings).status_code == 503
+    settings["system_name"] = "bad\nname"
+    assert client.put("/api/admin/stores/1/printer", headers=ADMIN, json=settings).status_code == 422

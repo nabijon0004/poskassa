@@ -158,8 +158,12 @@ class ReceiptSettings(BaseModel):
 class PrinterSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # "network": a printer in the store's network, by IP and port; "system": a printer
+    # installed in Windows on the register computer, by its name there.
+    connection_type: Literal["network", "system"] = "network"
     host: str = Field(default="", max_length=253, pattern=r"^[A-Za-z0-9.:-]*$")
     port: int = Field(default=9100, ge=1, le=65535)
+    system_name: str = Field(default="", max_length=255, pattern=r"^[^\x00-\x1f]*$")
     timeout: float = Field(default=3, ge=0.5, le=30)
     # 80 mm paper: 48 characters (576 dots) on most printers, 42 on 512-dot ones.
     chars_per_line: Literal[42, 48] = 48
@@ -167,10 +171,14 @@ class PrinterSettings(BaseModel):
     encoding: str = Field(default="cp866", min_length=1, max_length=20)
     receipt: ReceiptSettings = Field(default_factory=ReceiptSettings)
 
-    @field_validator("host", "encoding")
+    @field_validator("host", "system_name", "encoding")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.system_name if self.connection_type == "system" else self.host)
 
     @field_validator("encoding")
     @classmethod
@@ -998,7 +1006,7 @@ class OrderPrinter:
         title: str,
         order_ref: str | None = None,
     ) -> None:
-        if not settings.host:
+        if not settings.configured:
             raise PrinterError("Принтер не настроен.")
         printing.enqueue_job(store_id, data, kind=kind, title=title, order_ref=order_ref)
 

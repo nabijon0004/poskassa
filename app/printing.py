@@ -2,11 +2,13 @@
 
 The server runs in the cloud and cannot reach printers in the stores' local networks.
 Documents are queued per store; the cash register program (PaprikaPOS.exe) in the store
-takes the jobs with its register key and sends them to the printer over the local network.
+takes the jobs with its register key and sends them to the printer over the local network
+or to a printer installed in Windows on that computer.
 """
 from __future__ import annotations
 
 import base64
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -56,6 +58,10 @@ def initialize_print_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS print_jobs_store_status ON print_jobs (store_id, status, id)"
     )
+    # Printers installed in Windows on the register computer, as its program reports them.
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(devices)")}
+    if "printers" not in columns:
+        connection.execute("ALTER TABLE devices ADD COLUMN printers TEXT NOT NULL DEFAULT '[]'")
 
 
 def enqueue_job(store_id: int, data: bytes, *, kind: str, title: str, order_ref: str | None = None) -> int:
@@ -116,11 +122,22 @@ def claim_jobs(store_id: int, device_id: int) -> list[sqlite3.Row]:
     return jobs
 
 
+def device_printers(row: sqlite3.Row) -> list[str]:
+    try:
+        printers = json.loads(row["printers"])
+    except ValueError:
+        return []
+    return [name for name in printers if isinstance(name, str)] if isinstance(printers, list) else []
+
+
 def agents_status(connection: sqlite3.Connection, store_id: int) -> list[dict[str, Any]]:
     """Registers of the store and whether their program is taking print jobs."""
     online_after = (now() - AGENT_ONLINE_WINDOW).isoformat()
     rows = connection.execute(
-        "SELECT id, name, active, last_seen_at FROM devices WHERE store_id = ? AND kind = 'register' ORDER BY id",
+        """
+        SELECT id, name, active, last_seen_at, printers FROM devices
+        WHERE store_id = ? AND kind = 'register' ORDER BY id
+        """,
         (store_id,),
     ).fetchall()
     return [
@@ -130,6 +147,7 @@ def agents_status(connection: sqlite3.Connection, store_id: int) -> list[dict[st
             "active": bool(row["active"]),
             "last_seen_at": row["last_seen_at"],
             "online": bool(row["active"] and row["last_seen_at"] and row["last_seen_at"] >= online_after),
+            "printers": device_printers(row),
         }
         for row in rows
     ]
@@ -149,6 +167,12 @@ def recent_jobs(connection: sqlite3.Connection, store_id: int, limit: int = 10) 
 # --- agent API (cash register program) ------------------------------------------------
 
 
+class PrinterList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    printers: list[str] = Field(max_length=100)
+
+
 class JobResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -159,15 +183,44 @@ class JobResult(BaseModel):
 @router.get("/api/agent/print-jobs")
 def take_print_jobs(x_device_key: stores.DeviceKey = None) -> dict[str, Any]:
     device = stores.require_device(x_device_key, "register")
-    jobs = claim_jobs(device.store_id, device.id)
     settings = core.load_printer_settings(device.store_id)
+    if settings.connection_type == "system" and not has_printer(device.id, settings.system_name):
+        # The printer is installed on another register of the store: that one prints.
+        jobs = []
+    else:
+        jobs = claim_jobs(device.store_id, device.id)
     return {
-        "printer": {"host": settings.host, "port": settings.port, "timeout": settings.timeout},
+        "printer": {
+            "connection_type": settings.connection_type,
+            "host": settings.host,
+            "port": settings.port,
+            "system_name": settings.system_name,
+            "timeout": settings.timeout,
+        },
         "jobs": [
             {"id": job["id"], "title": job["title"], "data": base64.b64encode(job["data"]).decode("ascii")}
             for job in jobs
         ],
     }
+
+
+def has_printer(device_id: int, name: str) -> bool:
+    with closing(core.connect_db()) as connection:
+        row = connection.execute("SELECT printers FROM devices WHERE id = ?", (device_id,)).fetchone()
+    return row is not None and name in device_printers(row)
+
+
+@router.put("/api/agent/printers")
+def report_printers(payload: PrinterList, x_device_key: stores.DeviceKey = None) -> dict[str, int]:
+    """The register program reports the printers installed in Windows on its computer."""
+    device = stores.require_device(x_device_key, "register")
+    printers = sorted({name.strip()[:255] for name in payload.printers if name.strip()})
+    with closing(core.connect_db()) as connection:
+        connection.execute(
+            "UPDATE devices SET printers = ? WHERE id = ?", (json.dumps(printers, ensure_ascii=False), device.id)
+        )
+        connection.commit()
+    return {"printers": len(printers)}
 
 
 @router.post("/api/agent/print-jobs/{job_id}")

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageOps
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent  # resolve(): __file__ is relative on Python 3.8
 logo = Image.open(HERE.parent / "logo.jpg").convert("RGBA")
 logo = ImageOps.fit(logo, (256, 256), method=Image.Resampling.LANCZOS)
 mask = Image.new("L", logo.size, 0)

@@ -1,16 +1,22 @@
 """Paprika POS desktop app: opens the cash register page (/pos) in a WebView2 window.
 
 It also prints for its store: the server cannot reach printers in the store's local
-network, so this program takes the store's print jobs and sends them to the printer.
+network, so this program takes the store's print jobs and sends them to the printer —
+over the network by IP or to a printer installed in Windows. It reports the Windows
+printers to the server, so the admin panel can offer them.
 
 Settings live in pos-config.json next to the program:
     {"server_url": "https://paprika.example.com", "device_key": "...", "fullscreen": false}
 
 Keys: F11 — full screen, F5 — reload, Ctrl+Shift+S — server address and register key.
+
+pos_cloud.py builds a second program with the cloud server address built in: it asks
+only for the register key and keeps its own settings, log and browser data.
 """
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
 import logging
 import socket
@@ -28,17 +34,15 @@ import webview
 APP_TITLE = "Paprika — Касса"
 DEFAULT_CONFIG = {"server_url": "http://127.0.0.1:8000", "device_key": "", "fullscreen": False}
 PRINT_POLL_SECONDS = 2
+# How often the list of Windows printers is sent to the server.
+PRINTERS_REPORT_SECONDS = 60
 
 # Next to PaprikaPOS.exe when packaged, next to this script otherwise.
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 CONFIG_PATH = APP_DIR / "pos-config.json"
+# Set by pos_cloud.py: the server address is fixed and not asked for.
+PRESET_SERVER_URL: str | None = None
 
-logging.basicConfig(
-    filename=APP_DIR / "pos-app.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    encoding="utf-8",
-)
 log = logging.getLogger("paprika-pos")
 
 # Hotkeys added to every page, including the server's /pos page.
@@ -104,6 +108,7 @@ def device_kind(server_url: str, key: str) -> str | None:
 
 
 def settings_page(server_url: str, message: str, device_key: str = "") -> str:
+    readonly = " readonly" if PRESET_SERVER_URL else ""
     return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><title>{APP_TITLE}</title>
 <style>
@@ -123,7 +128,7 @@ def settings_page(server_url: str, message: str, device_key: str = "") -> str:
 <body><div class="card">
   <h1>Paprika · Касса</h1>
   <p>{escape(message)}</p>
-  <label>Адрес сервера<input id="url" value="{escape(server_url)}" placeholder="https://paprika.example.com"></label>
+  <label>Адрес сервера<input id="url" value="{escape(server_url)}"{readonly} placeholder="https://paprika.example.com"></label>
   <label style="margin-top:12px">Ключ кассы<input id="key" value="{escape(device_key)}" placeholder="Из админпанели: точка → Устройства" autocomplete="off"></label>
   <button id="connect">Подключиться</button>
   <p id="error"></p>
@@ -154,10 +159,11 @@ class Api:
         self.config = config
         # Underscore: pywebview does not expose it to the page (it logged errors walking the window).
         self._window: webview.Window | None = None
+        self._agent: PrintAgent | None = None
 
     def connect(self, url: str, key: str = "") -> str:
         try:
-            server_url = normalize_url(url)
+            server_url = PRESET_SERVER_URL or normalize_url(url)
         except ValueError as exc:
             return str(exc)
         if not server_is_up(server_url):
@@ -171,17 +177,32 @@ class Api:
         self.config["server_url"] = server_url
         self.config["device_key"] = key
         save_config(self.config)
+        if self._agent:
+            # A new key may belong to another register: tell it the printers right away.
+            self._agent.printers_reported_at = 0.0
         log.info("Connected to %s", server_url)
         self._window.load_url(register_url(server_url, key))
         return ""
 
     def show_settings(self) -> None:
         self._window.load_html(
-            settings_page(self.config["server_url"], "Укажите адрес сервера и ключ кассы.", self.config.get("device_key", ""))
+            settings_page(self.config["server_url"], "Укажите ключ кассы." if PRESET_SERVER_URL else "Укажите адрес сервера и ключ кассы.", self.config.get("device_key", ""))
         )
 
     def toggle_fullscreen(self) -> None:
         self._window.toggle_fullscreen()
+        self.config["fullscreen"] = not self.config.get("fullscreen", False)
+        save_config(self.config)
+
+    def print_to_printer(self, name: str, data: str) -> str:
+        """Print a receipt made by the page itself (offline mode) on a Windows printer."""
+        try:
+            send_to_system_printer(name, base64.b64decode(data))
+        except (OSError, ValueError) as exc:
+            log.warning("Offline print to %s failed: %s", name, exc)
+            return f"не удалось напечатать на принтер «{name}»"
+        log.info("Printed an offline receipt")
+        return ""
 
     def print_raw(self, host: str, port: int, timeout: float, data: str) -> str:
         """Print a receipt made by the page itself (offline mode); returns an error text or ""."""
@@ -192,8 +213,6 @@ class Api:
             return f"нет связи с принтером {host}:{port}"
         log.info("Printed an offline receipt")
         return ""
-        self.config["fullscreen"] = not self.config.get("fullscreen", False)
-        save_config(self.config)
 
 
 def register_url(server_url: str, key: str) -> str:
@@ -206,6 +225,67 @@ def send_to_printer(host: str, port: int, timeout: float, data: bytes) -> None:
         connection.sendall(data)
 
 
+# --- Windows printers (winspool) ------------------------------------------------------
+
+PRINTER_ENUM_LOCAL = 2
+PRINTER_ENUM_CONNECTIONS = 4
+
+
+class PRINTER_INFO_4(ctypes.Structure):
+    _fields_ = [("pPrinterName", ctypes.c_wchar_p), ("pServerName", ctypes.c_wchar_p), ("Attributes", ctypes.c_uint32)]
+
+
+class DOC_INFO_1(ctypes.Structure):
+    _fields_ = [("pDocName", ctypes.c_wchar_p), ("pOutputFile", ctypes.c_wchar_p), ("pDatatype", ctypes.c_wchar_p)]
+
+
+def winspool():
+    if sys.platform != "win32":
+        raise OSError("принтеры Windows есть только в Windows")
+    return ctypes.WinDLL("winspool.drv", use_last_error=True)
+
+
+def system_printers() -> list:
+    """Names of the printers installed on this computer, network connections included."""
+    spool = winspool()
+    flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS
+    needed, returned = ctypes.c_uint32(), ctypes.c_uint32()
+    spool.EnumPrintersW(flags, None, 4, None, 0, ctypes.byref(needed), ctypes.byref(returned))
+    if not needed.value:
+        return []
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not spool.EnumPrintersW(flags, None, 4, buffer, needed, ctypes.byref(needed), ctypes.byref(returned)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    infos = ctypes.cast(buffer, ctypes.POINTER(PRINTER_INFO_4))
+    return sorted({infos[index].pPrinterName for index in range(returned.value) if infos[index].pPrinterName})
+
+
+def send_to_system_printer(name: str, data: bytes, title: str = "Paprika") -> None:
+    """Send the ESC/POS bytes to a Windows printer as they are (RAW), past its driver."""
+    spool = winspool()
+
+    def check(result: int) -> None:
+        if not result:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    handle = ctypes.c_void_p()
+    check(spool.OpenPrinterW(name, ctypes.byref(handle), None))
+    try:
+        document = DOC_INFO_1(title, None, "RAW")
+        check(spool.StartDocPrinterW(handle, 1, ctypes.byref(document)))
+        try:
+            check(spool.StartPagePrinter(handle))
+            written = ctypes.c_uint32()
+            check(spool.WritePrinter(handle, data, len(data), ctypes.byref(written)))
+            if written.value != len(data):
+                raise OSError("принтер принял не все данные")
+            check(spool.EndPagePrinter(handle))
+        finally:
+            spool.EndDocPrinter(handle)
+    finally:
+        spool.ClosePrinter(handle)
+
+
 class PrintAgent(threading.Thread):
     """Takes the store's print jobs from the server and prints them on the local printer."""
 
@@ -213,6 +293,7 @@ class PrintAgent(threading.Thread):
         super().__init__(name="print-agent", daemon=True)
         self.config = config
         self.last_error = ""
+        self.printers_reported_at = 0.0
 
     def request(self, method: str, path: str, body: dict | None = None) -> dict:
         server_url = normalize_url(self.config["server_url"])
@@ -231,16 +312,34 @@ class PrintAgent(threading.Thread):
             log.warning("Print agent: %s", message)
             self.last_error = message
 
+    def report_printers(self) -> None:
+        if self.printers_reported_at and time.monotonic() - self.printers_reported_at < PRINTERS_REPORT_SECONDS:
+            return
+        try:
+            printers = system_printers()
+        except OSError as exc:
+            self.report_error(f"не удалось получить список принтеров Windows: {exc}")
+            printers = []
+        self.request("PUT", "/api/agent/printers", {"printers": printers})
+        self.printers_reported_at = time.monotonic()
+
     def print_job(self, printer: dict, job: dict) -> None:
         data = base64.b64decode(job["data"])
+        system = printer.get("connection_type") == "system"
         try:
-            if not printer.get("host"):
-                raise OSError("принтер точки не настроен в админпанели")
-            send_to_printer(printer["host"], printer["port"], printer.get("timeout", 3), data)
+            if system:
+                if not printer.get("system_name"):
+                    raise OSError("принтер точки не настроен в админпанели")
+                send_to_system_printer(printer["system_name"], data, job["title"])
+            else:
+                if not printer.get("host"):
+                    raise OSError("принтер точки не настроен в админпанели")
+                send_to_printer(printer["host"], printer["port"], printer.get("timeout", 3), data)
             result = {"status": "printed"}
             log.info("Printed %s", job["title"])
         except OSError as exc:
-            result = {"status": "failed", "error": f"Нет связи с принтером {printer.get('host')}:{printer.get('port')}: {exc}"[:300]}
+            target = f"«{printer.get('system_name')}»" if system else f"{printer.get('host')}:{printer.get('port')}"
+            result = {"status": "failed", "error": f"Не удалось напечатать на принтер {target}: {exc}"[:300]}
             self.report_error(result["error"])
         self.request("POST", f"/api/agent/print-jobs/{job['id']}", result)
 
@@ -248,6 +347,7 @@ class PrintAgent(threading.Thread):
         while True:
             if self.config.get("device_key"):
                 try:
+                    self.report_printers()
                     batch = self.request("GET", "/api/agent/print-jobs")
                     for job in batch["jobs"]:
                         self.print_job(batch["printer"], job)
@@ -258,8 +358,22 @@ class PrintAgent(threading.Thread):
             time.sleep(PRINT_POLL_SECONDS)
 
 
-def main() -> None:
+def main(preset_server_url: str | None = None, name: str = "pos") -> None:
+    """name prefixes the settings, log and browser data files next to the program."""
+    global CONFIG_PATH, PRESET_SERVER_URL
+    CONFIG_PATH = APP_DIR / f"{name}-config.json"
+    # A handler, not basicConfig(encoding=...): that needs Python 3.9, the Windows 7 build uses 3.8.
+    logging.basicConfig(
+        handlers=[logging.FileHandler(APP_DIR / f"{name}-app.log", encoding="utf-8")],
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
     config = load_config()
+    if preset_server_url:
+        PRESET_SERVER_URL = normalize_url(preset_server_url)
+        if config.get("server_url") != PRESET_SERVER_URL:
+            config["server_url"] = PRESET_SERVER_URL
+            save_config(config)
     api = Api(config)
     try:
         server_url = normalize_url(config["server_url"])
@@ -270,7 +384,7 @@ def main() -> None:
     # With a register key the page opens even without internet: it is kept on this computer
     # since the last online start, and sales are queued until the connection returns.
     ready = bool(key)
-    message = "Укажите адрес сервера и ключ кассы из админпанели."
+    message = "Укажите ключ кассы из админпанели." if PRESET_SERVER_URL else "Укажите адрес сервера и ключ кассы из админпанели."
     window = webview.create_window(
         APP_TITLE,
         url=register_url(server_url, key) if ready else None,
@@ -284,13 +398,14 @@ def main() -> None:
         text_select=True,
     )
     api._window = window
-    PrintAgent(config).start()
+    api._agent = PrintAgent(config)
+    api._agent.start()
     window.events.loaded += lambda: window.evaluate_js(HOTKEYS_JS)
     log.info("Starting, server %s (%s)", server_url, "online" if online else "offline")
     webview.start(
         gui="edgechromium",
         private_mode=False,
-        storage_path=str(APP_DIR / "webview-data"),
+        storage_path=str(APP_DIR / ("webview-data" if name == "pos" else f"webview-data-{name}")),
     )
 
 
