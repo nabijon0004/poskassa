@@ -130,6 +130,7 @@ table.data td.actions .btn + .btn { margin-left: 6px; }
 .printer-checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
 .printer-advanced summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 700; }
 .printer-advanced[open] summary { margin-bottom: 10px; }
+[data-connection][hidden] { display: none; }
 .receipt-preview-wrap { position: sticky; top: 16px; display: grid; gap: 8px; justify-items: center; }
 .receipt-preview-wrap small { max-width: 260px; color: var(--muted); font-size: 11px; text-align: center; }
 .receipt-paper { --receipt-columns: 48; width: calc(var(--receipt-columns) * 0.6em + 24px); padding: 18px 12px 26px; background: #fff; box-shadow: 0 6px 22px rgba(44, 37, 25, .16); font: 10px/1.35 "Courier New", Consolas, monospace; color: #111; overflow: hidden; }

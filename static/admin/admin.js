@@ -667,18 +667,45 @@ async function renderProducts(page, storeId) {
 
 // --- printer -----------------------------------------------------------------------
 
-function printerFormHtml(settings) {
+// Printers installed in Windows on the store's registers, with the registers that have each one.
+function systemPrinters(agents) {
+  const printers = new Map();
+  agents.forEach((agent) => (agent.printers || []).forEach((name) => {
+    printers.set(name, [...(printers.get(name) || []), agent.name]);
+  }));
+  return [...printers.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+function systemPrinterOptionsHtml(agents, current) {
+  const printers = systemPrinters(agents);
+  const known = printers.some(([name]) => name === current);
+  return [
+    `<option value="" ${current ? "" : "selected"}>— выберите принтер —</option>`,
+    ...printers.map(([name, registers]) => `<option value="${escapeHtml(name)}" ${name === current ? "selected" : ""}>${escapeHtml(name)} (${escapeHtml(registers.join(", "))})</option>`),
+    current && !known ? `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (сейчас не найден)</option>` : "",
+  ].join("");
+}
+
+function printerFormHtml(settings, agents) {
   const receipt = settings.receipt;
   const checkbox = (name, label) => `<label class="check"><input type="checkbox" name="${name}" ${receipt[name] ? "checked" : ""}> ${label}</label>`;
   const option = (value, current, label) => `<option value="${escapeHtml(value)}" ${String(value) === String(current) ? "selected" : ""}>${escapeHtml(label)}</option>`;
   const knownEncoding = ["cp866", "cp1251"].includes(settings.encoding);
+  const system = settings.connection_type === "system";
   return `
     <form id="printerForm" class="printer-layout">
       <div class="printer-fields">
         <h3>Подключение</h3>
-        <div class="form-grid">
+        <label class="field">Как подключён принтер<select name="connection_type">${option("network", settings.connection_type, "Сетевой принтер (по IP-адресу)")}${option("system", settings.connection_type, "Принтер, установленный в Windows на компьютере кассы")}</select></label>
+        <div class="form-grid" data-connection="network" ${system ? "hidden" : ""}>
           <label class="field">IP-адрес принтера в сети точки<input name="host" value="${escapeHtml(settings.host)}" placeholder="192.168.1.50" maxlength="253" autocomplete="off"></label>
           <label class="field">Порт<input name="port" type="number" min="1" max="65535" value="${settings.port}" required></label>
+        </div>
+        <div data-connection="system" ${system ? "" : "hidden"}>
+          <label class="field">Принтер Windows<select name="system_name">${systemPrinterOptionsHtml(agents, settings.system_name)}</select>
+            <small>Список присылают запущенные программы кассы этой точки (в скобках — на каких кассах установлен принтер). Печатать будет касса, на которой он есть. Нет нужного — установите принтер в Windows и подождите минуту.</small></label>
+        </div>
+        <div class="form-grid">
           <label class="field">Ширина строки<select name="chars_per_line">${option(48, settings.chars_per_line, "48 символов (обычно для 80 мм)")}${option(42, settings.chars_per_line, "42 символа")}</select></label>
           <label class="field">Кодировка<select name="encoding">${option("cp866", settings.encoding, "CP866 (русский)")}${option("cp1251", settings.encoding, "Windows-1251")}${knownEncoding ? "" : option(settings.encoding, settings.encoding, settings.encoding)}</select></label>
         </div>
@@ -725,8 +752,10 @@ function readPrinterForm(form) {
   const value = (name) => form.elements[name].value;
   const checked = (name) => form.elements[name].checked;
   return {
+    connection_type: value("connection_type"),
     host: value("host").trim(),
     port: Number(value("port")),
+    system_name: value("system_name"),
     timeout: Number(value("timeout")),
     chars_per_line: Number(value("chars_per_line")),
     codepage: Number(value("codepage")),
@@ -768,11 +797,11 @@ function printerStatusHtml(status) {
   return `
     <section class="card">
       <h2>Печать в точке</h2>
-      <p class="hint">Сервер ставит чеки в очередь, а программа кассы PaprikaPOS.exe в точке забирает их и печатает на принтер в локальной сети. Нужна хотя бы одна запущенная программа кассы с ключом этой точки.</p>
+      <p class="hint">Сервер ставит чеки в очередь, а программа кассы PaprikaPOS.exe в точке забирает их и печатает на принтер в локальной сети или на принтер, установленный в Windows. Нужна хотя бы одна запущенная программа кассы с ключом этой точки.</p>
       <div class="agent-list">${status.agents.map((agent) => `
         <div><strong>${escapeHtml(agent.name)}</strong><span class="badge ${agent.online ? "ok" : agent.active ? "" : "off"}">${agent.online ? "Печатает" : agent.active ? "Не на связи" : "Отключена"}</span><span class="hint" style="margin:0">последний раз: ${escapeHtml(lastSeen(agent.last_seen_at))}</span></div>`).join("") || `<p class="empty">В точке нет касс — добавьте кассу в разделе «Устройства».</p>`}
       </div>
-      ${!status.configured ? `<p class="warning">Укажите IP-адрес принтера ниже, иначе чеки не печатаются.</p>` : online.length ? "" : `<p class="warning">Ни одна программа кассы сейчас не на связи — чеки ждут в очереди до 15 минут.</p>`}
+      ${!status.configured ? `<p class="warning">Укажите принтер ниже, иначе чеки не печатаются.</p>` : online.length ? "" : `<p class="warning">Ни одна программа кассы сейчас не на связи — чеки ждут в очереди до 15 минут.</p>`}
       ${status.jobs.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Документ</th><th>Время</th><th>Статус</th><th>Ошибка</th></tr></thead><tbody>${status.jobs.map((job) => `
         <tr><td>${escapeHtml(job.title)}</td><td>${formatDateTime(job.created_at)}</td><td><span class="badge ${JOB_STATUS[job.status]?.[1] || ""}">${JOB_STATUS[job.status]?.[0] || escapeHtml(job.status)}</span></td><td>${escapeHtml(job.error || "")}</td></tr>`).join("")}</tbody></table></div>` : ""}
     </section>`;
@@ -785,10 +814,15 @@ async function renderPrinter(page, storeId) {
   ]);
   const store = storeById(storeId);
   page.innerHTML = `
-    ${pageHead(`Принтер · ${store.name}`, "Сетевой чековый принтер 80 мм (ESC/POS, обычно порт 9100).")}
+    ${pageHead(`Принтер · ${store.name}`, "Чековый принтер 80 мм (ESC/POS): сетевой (обычно порт 9100) или установленный в Windows на компьютере кассы.")}
     <div id="printerStatus">${printerStatusHtml(status)}</div>
-    <section class="card">${printerFormHtml(settings)}</section>`;
+    <section class="card">${printerFormHtml(settings, status.agents)}</section>`;
   const form = page.querySelector("#printerForm");
+  form.elements.connection_type.addEventListener("change", () => {
+    form.querySelectorAll("[data-connection]").forEach((block) => {
+      block.hidden = block.dataset.connection !== form.elements.connection_type.value;
+    });
+  });
   const message = page.querySelector("#printerMessage");
   const preview = page.querySelector("#receiptPreview");
   let previewTimer;

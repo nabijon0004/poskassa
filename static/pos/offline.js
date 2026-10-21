@@ -96,12 +96,16 @@ const offline = {
 
   async print(bytes) {
     const printer = this.usableData()?.printer;
-    if (!printer?.host) return "Принтер точки не настроен.";
+    const system = printer?.connection_type === "system";
+    if (!(system ? printer.system_name : printer?.host)) return "Принтер точки не настроен.";
     if (!this.canPrint()) return "Печать без интернета работает только в программе кассы PaprikaPOS.exe.";
+    const app = window.pywebview.api;
+    if (system && !app.print_to_printer) return "Обновите программу кассы: эта версия не печатает на принтер Windows.";
     let binary = "";
     bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+    const data = window.btoa(binary);
     try {
-      return await window.pywebview.api.print_raw(printer.host, printer.port, printer.timeout, window.btoa(binary)) || "";
+      return await (system ? app.print_to_printer(printer.system_name, data) : app.print_raw(printer.host, printer.port, printer.timeout, data)) || "";
     } catch (error) {
       return String(error?.message || error);
     }

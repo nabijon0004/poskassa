@@ -757,7 +757,7 @@ def printer_status(store_id: int, authorization: Authorization = None) -> dict[s
         agents = printing.agents_status(connection, store_id)
         jobs = printing.recent_jobs(connection, store_id)
     settings = core.load_printer_settings(store_id)
-    return {"configured": bool(settings.host), "agents": agents, "jobs": jobs}
+    return {"configured": settings.configured, "agents": agents, "jobs": jobs}
 
 
 @router.post("/api/admin/stores/{store_id}/printer/test")
