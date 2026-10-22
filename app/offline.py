@@ -28,6 +28,8 @@ router = APIRouter()
 MAX_CLOCK_AHEAD = timedelta(minutes=10)
 MAX_OFFLINE_AGE = timedelta(days=30)
 MAX_OPERATIONS = 200
+# Delivery customers kept on the register to fill in addresses without internet.
+OFFLINE_CUSTOMERS_LIMIT = 1000
 
 
 @router.get("/api/pos/offline-data")
@@ -48,6 +50,10 @@ def offline_data(x_device_key: stores.DeviceKey = None) -> dict[str, Any]:
             if shift
             else None
         )
+        customers = connection.execute(
+            "SELECT * FROM customers WHERE store_id = ? ORDER BY last_order_at DESC LIMIT ?",
+            (register.store_id, OFFLINE_CUSTOMERS_LIMIT),
+        ).fetchall()
     return {
         "generated_at": pos.now_iso(),
         "store": {"id": register.store_id, "name": register.store_name},
@@ -59,6 +65,7 @@ def offline_data(x_device_key: stores.DeviceKey = None) -> dict[str, Any]:
         "cashiers": [{**pos.public_cashier(row), "pin_hash": row["pin_hash"]} for row in cashiers],
         "printer": core.load_printer_settings(register.store_id).model_dump(),
         "shift": shift_data,
+        "customers": [pos.public_customer(row) for row in customers],
     }
 
 
@@ -156,7 +163,7 @@ def apply_sale(register: stores.Device, operation: SaleOperation) -> dict[str, A
     request_hash = hashlib.sha256(
         operation.model_dump_json(include={"items", "payment_method", "amount_received", "discount_type", "discount_value"}).encode()
     ).hexdigest()
-    row, _ = core.store_order(
+    row, created = core.store_order(
         core.parse_idempotency_key(operation.id),
         request_hash,
         {
@@ -165,6 +172,8 @@ def apply_sale(register: stores.Device, operation: SaleOperation) -> dict[str, A
             "created_at": at,
             "comment": operation.comment,
             "service_type": operation.service_type or "",
+            "customer_phone": operation.customer_phone,
+            "delivery_address": operation.delivery_address,
             "source": "pos",
             "payment_status": "paid",
             "payment_method": payment["payment_method"],
@@ -184,6 +193,8 @@ def apply_sale(register: stores.Device, operation: SaleOperation) -> dict[str, A
             "offline_number": operation.offline_number,
         },
     )
+    if created:
+        pos.remember_delivery_customer(register.store_id, operation, at)
     return {"order_ref": row["order_number"], "order_number": core.display_order_number(row["store_seq"]), "total": row["total"]}
 
 

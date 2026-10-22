@@ -50,6 +50,11 @@ function formatDateTime(iso) {
   return iso ? new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 }
 
+// A local Tajik number (9 digits) as "93 123 45 67", as on the receipts.
+function formatPhone(digits) {
+  return digits.length === 9 ? `${digits.slice(0, 2)} ${digits.slice(2, 5)} ${digits.slice(5, 7)} ${digits.slice(7)}` : digits;
+}
+
 function today() {
   return new Date().toLocaleDateString("sv-SE");
 }
@@ -209,6 +214,7 @@ const STORE_PAGES = [
   { id: "products", label: "Товары" },
   { id: "printer", label: "Принтер" },
   { id: "orders", label: "Заказы" },
+  { id: "customers", label: "Клиенты" },
 ];
 
 function currentRoute() {
@@ -282,6 +288,7 @@ function route() {
     products: renderProducts,
     printer: renderPrinter,
     orders: renderOrders,
+    customers: renderCustomers,
   };
   page.innerHTML = `<p class="empty">Загрузка…</p>`;
   pages[current.page](page, current.storeId).catch((error) => {
@@ -966,7 +973,7 @@ async function renderPrinter(page, storeId) {
 
 const PAYMENT_STATUS = { paid: ["Оплачен", "ok"], unpaid: ["Ждёт оплаты", "warn"], refunded: ["Возврат", "off"], cancelled: ["Отменён", "off"] };
 const PRINT_STATUS = { printed: "Напечатан", queued: "В очереди печати", failed: "Не напечатан", not_attempted: "—" };
-const SERVICE_LABELS = { dine_in: "В зале", takeaway: "С собой" };
+const SERVICE_LABELS = { dine_in: "В зале", takeaway: "С собой", delivery: "Доставка" };
 
 async function renderOrders(page, storeId) {
   const orders = await api(`/api/admin/stores/${storeId}/orders`);
@@ -994,6 +1001,137 @@ async function renderOrders(page, storeId) {
       showToast(`Чек заказа № ${printed.order_number} поставлен в очередь печати`);
     } catch (error) { showToast(error.message, true); }
   }));
+}
+
+// --- delivery customers ----------------------------------------------------------------
+
+const CUSTOMER_SEARCH_DELAY_MS = 300;
+
+async function renderCustomers(page, storeId) {
+  const store = storeById(storeId);
+  page.innerHTML = `
+    ${pageHead(`Клиенты · ${store.name}`, "Клиенты доставки. Касса сохраняет телефон и адрес при оплате и подставляет адрес по номеру телефона.")}
+    <section class="card">
+      <h2>Новый клиент</h2>
+      <form id="customerForm" class="form-grid">
+        <label class="field">Телефон<input name="phone" inputmode="tel" maxlength="30" required placeholder="93 123 45 67" autocomplete="off"></label>
+        <label class="field">Адрес<input name="address" maxlength="200" required placeholder="Улица, дом, квартира, ориентир"></label>
+        <button class="btn btn-primary" type="submit">Добавить</button>
+      </form>
+      <p class="message" id="customerMessage"></p>
+    </section>
+    <section class="card">
+      <h2 id="customersTitle">Клиенты</h2>
+      <input class="input" id="customerSearch" type="search" placeholder="Поиск по телефону или адресу" style="margin-bottom:12px">
+      <div id="customerList"><p class="empty">Загрузка…</p></div>
+    </section>`;
+  const search = page.querySelector("#customerSearch");
+  const list = page.querySelector("#customerList");
+  let customers = [];
+  let searchTimer;
+  let requestId = 0;
+
+  const load = async () => {
+    const id = ++requestId;
+    const query = search.value.trim();
+    let data;
+    try {
+      data = await api(`/api/admin/stores/${storeId}/customers?q=${encodeURIComponent(query)}`);
+    } catch (error) {
+      list.innerHTML = `<p class="message is-error">${escapeHtml(error.message)}</p>`;
+      return;
+    }
+    if (id !== requestId) return;
+    customers = data.customers;
+    page.querySelector("#customersTitle").textContent = `Клиенты · ${data.total}`;
+    const more = data.total > customers.length ? `<p class="hint">Показаны первые ${customers.length} — уточните поиск.</p>` : "";
+    list.innerHTML = customers.length ? `${more}<div class="table-wrap"><table class="data"><thead><tr><th>Телефон</th><th>Адрес</th><th class="num">Заказов</th><th>Последний заказ</th><th></th></tr></thead><tbody>${customers.map((customer) => `
+      <tr>
+        <td><strong>${escapeHtml(formatPhone(customer.phone))}</strong></td>
+        <td>${escapeHtml(customer.address)}</td>
+        <td class="num">${customer.orders_count}</td>
+        <td>${formatDateTime(customer.last_order_at)}</td>
+        <td class="actions">
+          <button class="btn btn-small" data-history="${customer.id}" ${customer.orders_count ? "" : "disabled"}>Заказы</button>
+          <button class="btn btn-small" data-edit="${customer.id}">Изменить</button>
+          <button class="btn btn-small btn-danger" data-delete="${customer.id}">Удалить</button>
+        </td>
+      </tr>`).join("")}</tbody></table></div>` : `<p class="empty">${query ? "Никого не нашли." : "Клиентов пока нет — они появятся после первой доставки с кассы."}</p>`;
+    const find = (customerId) => customers.find((customer) => customer.id === Number(customerId));
+    list.querySelectorAll("[data-edit]").forEach((button) => button.addEventListener("click", () => openCustomerEditor(storeId, find(button.dataset.edit), load)));
+    list.querySelectorAll("[data-history]").forEach((button) => button.addEventListener("click", () => openCustomerOrders(storeId, find(button.dataset.history))));
+    list.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", async () => {
+      const customer = find(button.dataset.delete);
+      if (!await confirmAction("Удалить клиента?", `${formatPhone(customer.phone)} · ${customer.address}. Касса больше не будет подставлять этот адрес; прошлые заказы не изменятся.`, "Удалить")) return;
+      try {
+        await api(`/api/admin/stores/${storeId}/customers/${customer.id}`, { method: "DELETE" });
+        showToast("Клиент удалён");
+        load();
+      } catch (error) { showToast(error.message, true); }
+    }));
+  };
+
+  search.addEventListener("input", () => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(load, CUSTOMER_SEARCH_DELAY_MS);
+  });
+  page.querySelector("#customerForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    try {
+      await api(`/api/admin/stores/${storeId}/customers`, {
+        method: "POST",
+        body: { phone: form.elements.phone.value, address: form.elements.address.value },
+      });
+      showToast("Клиент добавлен");
+      form.reset();
+      setMessage(page.querySelector("#customerMessage"), "");
+      load();
+    } catch (error) { setMessage(page.querySelector("#customerMessage"), error.message, true); }
+  });
+  await load();
+}
+
+function openCustomerEditor(storeId, customer, onSaved) {
+  const modal = openModal("Клиент", `
+    <form id="customerEdit" class="printer-fields">
+      <label class="field">Телефон<input name="phone" inputmode="tel" maxlength="30" required value="${escapeHtml(customer.phone)}"></label>
+      <label class="field">Адрес<input name="address" maxlength="200" required value="${escapeHtml(customer.address)}"></label>
+      <p class="message" id="customerEditMessage"></p>
+      <div class="btn-row"><button class="btn btn-primary" type="submit">Сохранить</button><button class="btn" type="button" data-close>Отмена</button></div>
+    </form>`);
+  modal.querySelector("[type=button][data-close]").addEventListener("click", closeModal);
+  modal.querySelector("#customerEdit").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    try {
+      await api(`/api/admin/stores/${storeId}/customers/${customer.id}`, {
+        method: "PUT",
+        body: { phone: form.elements.phone.value, address: form.elements.address.value },
+      });
+      closeModal();
+      showToast("Клиент сохранён");
+      onSaved();
+    } catch (error) { setMessage(modal.querySelector("#customerEditMessage"), error.message, true); }
+  });
+}
+
+async function openCustomerOrders(storeId, customer) {
+  let orders;
+  try {
+    orders = await api(`/api/admin/stores/${storeId}/customers/${customer.id}/orders`);
+  } catch (error) {
+    showToast(error.message, true);
+    return;
+  }
+  openModal(`Заказы · ${formatPhone(customer.phone)}`, orders.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>№</th><th>Время</th><th>Адрес</th><th>Статус</th><th class="num">Сумма</th></tr></thead><tbody>${orders.map((order) => `
+    <tr>
+      <td><strong>${escapeHtml(order.order_number)}</strong></td>
+      <td>${formatDateTime(order.created_at)}</td>
+      <td>${escapeHtml(order.delivery_address || "")}</td>
+      <td><span class="badge ${PAYMENT_STATUS[order.payment_status]?.[1] || ""}">${PAYMENT_STATUS[order.payment_status]?.[0] || escapeHtml(order.payment_status)}</span></td>
+      <td class="num">${money(order.total)}</td>
+    </tr>`).join("")}</tbody></table></div>` : `<p class="empty">Заказов нет.</p>`, { wide: true });
 }
 
 // --- reports and shifts ----------------------------------------------------------------
@@ -1198,7 +1336,9 @@ function showOrderCard(order) {
       ${row("Оплачен", order.paid_at ? formatDateTime(order.paid_at) : "")}
       ${row("Кассир", order.cashier_name ? escapeHtml(order.cashier_name) : "")}
       ${row("Смена", order.shift_id ? `№ ${order.shift_id}` : "")}
-      ${row("В зале / с собой", SERVICE_LABELS[order.service_type] || "")}
+      ${row("Обслуживание", SERVICE_LABELS[order.service_type] || "")}
+      ${row("Телефон клиента", order.customer_phone ? escapeHtml(order.customer_phone) : "")}
+      ${row("Адрес доставки", order.delivery_address ? escapeHtml(order.delivery_address) : "")}
       ${row("Кухня", KITCHEN_STATUS[order.kitchen_status] || "")}
       ${row("Печать на кухню", PRINT_STATUS[order.print_status] || "")}
       ${row("Отменён", order.cancelled_at ? formatDateTime(order.cancelled_at) : "")}

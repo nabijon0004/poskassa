@@ -580,6 +580,155 @@ def update_cashier(
     return pos.public_cashier(row)
 
 
+# --- delivery customers ------------------------------------------------------------
+
+CUSTOMERS_PAGE_LIMIT = 200
+CUSTOMER_ORDERS_LIMIT = 30
+
+
+def customer_phone(value: str) -> str:
+    phone = pos.normalize_phone(value)
+    if not 5 <= len(phone) <= 15:
+        raise ValueError("Телефон — от 5 до 15 цифр.")
+    return phone
+
+
+def customer_address(value: str) -> str:
+    address = pos.normalize_address(value)
+    if not address:
+        raise ValueError("Укажите адрес.")
+    return address
+
+
+class CustomerInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str = Field(max_length=30)
+    address: str = Field(max_length=200)
+
+    @field_validator("phone")
+    @classmethod
+    def phone_digits(cls, value: str) -> str:
+        return customer_phone(value)
+
+    @field_validator("address")
+    @classmethod
+    def address_text(cls, value: str) -> str:
+        return customer_address(value)
+
+
+class CustomerUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str | None = Field(default=None, max_length=30)
+    address: str | None = Field(default=None, max_length=200)
+
+    @field_validator("phone")
+    @classmethod
+    def phone_digits(cls, value: str | None) -> str | None:
+        return None if value is None else customer_phone(value)
+
+    @field_validator("address")
+    @classmethod
+    def address_text(cls, value: str | None) -> str | None:
+        return None if value is None else customer_address(value)
+
+
+def load_store_customer(connection: sqlite3.Connection, store_id: int, customer_id: int) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT * FROM customers WHERE id = ? AND store_id = ?", (customer_id, store_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Клиент не найден.")
+    return row
+
+
+def phone_taken(connection: sqlite3.Connection, store_id: int, phone: str, exclude_id: int | None = None) -> None:
+    row = connection.execute(
+        "SELECT id FROM customers WHERE store_id = ? AND phone = ?", (store_id, phone)
+    ).fetchone()
+    if row is not None and row["id"] != exclude_id:
+        raise HTTPException(status_code=409, detail="Клиент с таким телефоном уже есть.")
+
+
+@router.get("/api/admin/stores/{store_id}/customers")
+def list_customers(store_id: int, q: str = "", authorization: Authorization = None) -> dict[str, Any]:
+    """The store's delivery customers, the latest orders first; `q` is a part of the phone or address."""
+    require_store(authorization, store_id)
+    where, values = "store_id = ?", [store_id]
+    text = q.strip()
+    if text:
+        digits = pos.normalize_phone(text)
+        # SQLite's lower() and LIKE ignore the case of ASCII letters only, so Cyrillic is folded
+        # in Python; instr also keeps % and _ typed by the user from acting as wildcards.
+        where += " AND (instr(casefold(address), ?) > 0" + (" OR instr(phone, ?) > 0)" if digits else ")")
+        values += [text.casefold(), *([digits] if digits else [])]
+    with closing(core.connect_db()) as connection:
+        connection.create_function("casefold", 1, lambda value: (value or "").casefold(), deterministic=True)
+        total = connection.execute(f"SELECT COUNT(*) FROM customers WHERE {where}", values).fetchone()[0]
+        rows = connection.execute(
+            f"""
+            SELECT * FROM customers WHERE {where}
+            ORDER BY last_order_at IS NULL, last_order_at DESC, id DESC LIMIT ?
+            """,
+            [*values, CUSTOMERS_PAGE_LIMIT],
+        ).fetchall()
+    return {"total": total, "customers": [pos.public_customer(row) for row in rows]}
+
+
+@router.post("/api/admin/stores/{store_id}/customers", status_code=201)
+def create_customer(store_id: int, payload: CustomerInput, authorization: Authorization = None) -> dict[str, Any]:
+    require_store(authorization, store_id)
+    with closing(core.connect_db()) as connection:
+        phone_taken(connection, store_id, payload.phone)
+        cursor = connection.execute(
+            "INSERT INTO customers (store_id, phone, address, orders_count, created_at) VALUES (?, ?, ?, 0, ?)",
+            (store_id, payload.phone, payload.address, now().isoformat()),
+        )
+        connection.commit()
+        return pos.public_customer(load_store_customer(connection, store_id, cursor.lastrowid))
+
+
+@router.put("/api/admin/stores/{store_id}/customers/{customer_id}")
+def update_customer(
+    store_id: int, customer_id: int, payload: CustomerUpdate, authorization: Authorization = None
+) -> dict[str, Any]:
+    require_store(authorization, store_id)
+    with closing(core.connect_db()) as connection:
+        load_store_customer(connection, store_id, customer_id)
+        updates = payload.model_dump(exclude_none=True)
+        if "phone" in updates:
+            phone_taken(connection, store_id, updates["phone"], exclude_id=customer_id)
+        if updates:
+            assignments = ", ".join(f"{name} = ?" for name in updates)
+            connection.execute(f"UPDATE customers SET {assignments} WHERE id = ?", (*updates.values(), customer_id))
+            connection.commit()
+        return pos.public_customer(load_store_customer(connection, store_id, customer_id))
+
+
+@router.delete("/api/admin/stores/{store_id}/customers/{customer_id}", status_code=204)
+def delete_customer(store_id: int, customer_id: int, authorization: Authorization = None) -> Response:
+    """The orders keep their phone and address; only the saved customer is removed."""
+    require_store(authorization, store_id)
+    with closing(core.connect_db()) as connection:
+        load_store_customer(connection, store_id, customer_id)
+        connection.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+        connection.commit()
+    return Response(status_code=204)
+
+
+@router.get("/api/admin/stores/{store_id}/customers/{customer_id}/orders")
+def customer_orders(store_id: int, customer_id: int, authorization: Authorization = None) -> list[dict[str, Any]]:
+    require_store(authorization, store_id)
+    with closing(core.connect_db()) as connection:
+        customer = load_store_customer(connection, store_id, customer_id)
+        rows = connection.execute(
+            "SELECT * FROM orders WHERE store_id = ? AND customer_phone = ? ORDER BY id DESC LIMIT ?",
+            (store_id, customer["phone"], CUSTOMER_ORDERS_LIMIT),
+        ).fetchall()
+        return [pos.pos_order(connection, row) for row in rows]
+
+
 # --- products --------------------------------------------------------------------
 
 

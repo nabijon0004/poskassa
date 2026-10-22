@@ -63,6 +63,22 @@ const offline = {
 
   pendingSales() { return this.outbox.filter((operation) => operation.type === "sale"); },
 
+  // --- delivery customers (same search as /api/pos/customers) ---------------------------
+
+  findCustomers(digits) {
+    const customers = (this.usableData()?.customers || []).filter((customer) => customer.phone.includes(digits));
+    return customers.sort((a, b) => (b.phone === digits) - (a.phone === digits)).slice(0, 6);
+  },
+
+  // A delivery sold offline: its address is found again before the server copy is refreshed.
+  rememberCustomer(phone, address) {
+    const data = this.usableData();
+    if (!data) return;
+    const previous = (data.customers || []).find((customer) => customer.phone === phone);
+    const customer = { phone, address, orders_count: (previous?.orders_count || 0) + 1, last_order_at: new Date().toISOString() };
+    this.write(OFFLINE_DATA_KEY, { ...data, customers: [customer, ...(data.customers || []).filter((entry) => entry !== previous)] });
+  },
+
   // Offline orders are numbered О1..О30 so they never look like the server's numbers.
   nextNumber() {
     const next = (Number(this.read(OFFLINE_NUMBER_KEY, 0)) % OFFLINE_NUMBER_MAX) + 1;
@@ -151,7 +167,7 @@ const receipts = {
     "≈": "~", "ғ": "г", "Ғ": "Г", "ӣ": "и", "Ӣ": "И", "қ": "к", "Қ": "К",
     "ӯ": "у", "Ӯ": "У", "ҳ": "х", "Ҳ": "Х", "ҷ": "ч", "Ҷ": "Ч",
   },
-  SERVICE_LABELS: { dine_in: "В зале", takeaway: "С собой" },
+  SERVICE_LABELS: { dine_in: "В зале", takeaway: "С собой", delivery: "Доставка" },
 
   line(text, { align = "left", bold = false, width = 1, height = 1 } = {}) {
     return { text, align, bold, width, height };
@@ -227,6 +243,18 @@ const receipts = {
     return lines;
   },
 
+  // Same as app/main.py format_phone.
+  phone(digits) {
+    return digits.length === 9 ? `${digits.slice(0, 2)} ${digits.slice(2, 5)} ${digits.slice(5, 7)} ${digits.slice(7)}` : digits;
+  },
+
+  deliveryLines(order, columns, bold) {
+    const lines = [];
+    if (order.customer_phone) lines.push(this.line(`Тел.: ${this.phone(order.customer_phone)}`.slice(0, columns), { bold }));
+    if (order.delivery_address) this.wrap(`Адрес: ${order.delivery_address}`, columns, "       ").forEach((chunk) => lines.push(this.line(chunk, { bold })));
+    return lines;
+  },
+
   amountLine(label, amount, columns, currency, bold = false) {
     const value = this.money(amount, currency);
     return this.line(`${label.padEnd(columns - value.length - 1)} ${value}`, { bold });
@@ -244,6 +272,7 @@ const receipts = {
     const service = this.SERVICE_LABELS[order.service_type];
     if (receipt.show_service_type && service) lines.push(this.line(service.toUpperCase(), { align: "center", bold: true, width: 2, height: 2 }));
     if (receipt.show_time) lines.push(this.line(this.dateTime(order.created_at), { align: "center" }));
+    lines.push(...this.deliveryLines(order, columns, true));
     if (receipt.show_items) {
       lines.push(separator);
       lines.push(...this.itemLines(order.items, columns, { showPrices: receipt.show_prices, height: receipt.items_large ? 2 : 1, currency }));
@@ -270,6 +299,7 @@ const receipts = {
     if (cashierName) lines.push(this.line(`Кассир: ${cashierName}`.slice(0, columns), { align: "center" }));
     const service = this.SERVICE_LABELS[order.service_type];
     if (service) lines.push(this.line(service, { align: "center" }));
+    lines.push(...this.deliveryLines(order, columns, false));
     lines.push(separator);
     lines.push(...this.itemLines(order.items, columns, { showPrices: true, currency }));
     lines.push(separator);

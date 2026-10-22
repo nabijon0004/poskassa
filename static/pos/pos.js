@@ -17,6 +17,10 @@ const state = {
   serviceType: "dine_in",
   // Customer's wishes for the kitchen; printed on the kitchen ticket.
   comment: "",
+  // Delivery: the customer's phone (digits) and address, printed on both tickets.
+  customerPhone: "",
+  deliveryAddress: "",
+  saveCustomer: true,
   kioskOrders: [],
   kitchenOrders: [],
   history: [],
@@ -130,11 +134,16 @@ async function api(path, { method = "GET", body, headers = {} } = {}) {
     signOut(false);
     throw new Error(data.detail || "Сессия завершена. Войдите снова.");
   }
-  if (!response.ok) {
-    const detail = Array.isArray(data.detail) ? "Проверьте введённые данные." : data.detail;
-    throw new Error(detail || "Не удалось выполнить запрос.");
-  }
+  if (!response.ok) throw new Error(errorText(data.detail) || "Не удалось выполнить запрос.");
   return data;
+}
+
+// Field errors (422) carry the server's own message after "Value error, "; other
+// field errors are technical, in English.
+function errorText(detail) {
+  if (!Array.isArray(detail)) return detail;
+  const own = detail.map((error) => /^Value error, (.+)$/.exec(error.msg || "")?.[1]).find(Boolean);
+  return own || "Проверьте введённые данные. Если ошибка повторяется, обновите сервер кассы.";
 }
 
 function closeModal() {
@@ -187,6 +196,83 @@ function parseAmount(text) {
 
 function bindKeypad(container, onKey) {
   container.querySelectorAll("[data-key]").forEach((button) => button.addEventListener("click", () => onKey(button.dataset.key)));
+}
+
+// Same as app/pos.py normalize_phone: digits only, without +992 of a Tajik number.
+function normalizePhone(value) {
+  const digits = String(value).replace(/\D/g, "");
+  return digits.length === 12 && digits.startsWith("992") ? digits.slice(3) : digits;
+}
+
+// Typing into an input or textarea at its cursor, as a real keyboard does.
+function typeInto(input, text) {
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  const limit = input.maxLength > 0 ? input.maxLength : Infinity;
+  if (input.value.length - (end - start) + text.length > limit) return;
+  input.setRangeText(text, start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function eraseFrom(input) {
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  if (start === end && start === 0) return;
+  input.setRangeText("", start === end ? start - 1 : start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+// On-screen keyboard for the touch screen: Russian with the Tajik letters, and English.
+const KEYBOARD_DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "⌫"];
+const KEYBOARD_LAYOUTS = {
+  ru: [
+    KEYBOARD_DIGITS,
+    ["й", "ц", "у", "к", "е", "н", "г", "ш", "щ", "з", "х", "ъ"],
+    ["ф", "ы", "в", "а", "п", "р", "о", "л", "д", "ж", "э"],
+    ["⇧", "я", "ч", "с", "м", "и", "т", "ь", "б", "ю", ".", ","],
+    ["EN", "ғ", "ӣ", "қ", "ӯ", "ҳ", "ҷ", "space", "-", "/", "№"],
+  ],
+  en: [
+    KEYBOARD_DIGITS,
+    ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+    ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
+    ["⇧", "z", "x", "c", "v", "b", "n", "m", ".", ","],
+    ["RU", "space", "-", "/", "№"],
+  ],
+};
+
+// Draws the keyboard into `container` and types into the input given by `target()`.
+// The first letter of an empty field is a capital one.
+function mountKeyboard(container, target) {
+  let layout = "ru";
+  let shift = !target().value;
+  const draw = () => {
+    container.innerHTML = `<div class="vkeyboard">${KEYBOARD_LAYOUTS[layout].map((row) => `
+      <div class="vk-row">${row.map((key) => {
+        const special = { "⌫": "vk-wide", "⇧": `vk-wide vk-shift ${shift ? "active" : ""}`, EN: "vk-wide", RU: "vk-wide", space: "vk-space" }[key] || "";
+        const label = key === "space" ? "Пробел" : shift && key.length === 1 ? key.toUpperCase() : key;
+        return `<button type="button" class="${special}" data-vk="${escapeHtml(key)}">${escapeHtml(label)}</button>`;
+      }).join("")}</div>`).join("")}
+    </div>`;
+  };
+  // Keys do not take the focus away from the field being typed into.
+  container.addEventListener("mousedown", (event) => event.preventDefault());
+  container.addEventListener("click", (event) => {
+    const key = event.target.closest("[data-vk]")?.dataset.vk;
+    if (!key) return;
+    const input = target();
+    if (key === "⇧") shift = !shift;
+    else if (key === "EN" || key === "RU") layout = key.toLowerCase();
+    else if (key === "⌫") eraseFrom(input);
+    else {
+      typeInto(input, key === "space" ? " " : shift ? key.toUpperCase() : key);
+      shift = false;
+    }
+    if (!input.value) shift = true;
+    input.focus();
+    draw();
+  });
+  draw();
 }
 
 // --- connection and offline mode ----------------------------------------------------
@@ -712,7 +798,11 @@ function renderTicket() {
       <div class="segmented">
         <button data-service="dine_in" class="${state.serviceType === "dine_in" ? "active" : ""}">В зале</button>
         <button data-service="takeaway" class="${state.serviceType === "takeaway" ? "active" : ""}">С собой</button>
+        <button data-service="delivery" class="${state.serviceType === "delivery" ? "active" : ""}">Доставка</button>
       </div>
+      ${state.serviceType !== "delivery" ? "" : deliveryReady()
+        ? `<div class="delivery-info"><div><strong>📞 ${escapeHtml(receipts.phone(state.customerPhone))}</strong><span>📍 ${escapeHtml(state.deliveryAddress)}</span></div><button class="btn btn-small" id="editDelivery">Изменить</button></div>`
+        : `<button class="delivery-missing" id="editDelivery">Укажите телефон и адрес доставки</button>`}
       <div class="ticket-actions">
         <button class="btn" id="commentButton" ${state.cart.length ? "" : "disabled"}>Комментарий</button>
         <button class="btn btn-primary pay-button" id="payButton" ${state.cart.length ? "" : "disabled"}>Оплатить</button>
@@ -728,20 +818,199 @@ function renderTicket() {
   ticket.querySelectorAll("[data-service]").forEach((button) => button.addEventListener("click", () => {
     state.serviceType = button.dataset.service;
     renderTicket();
+    if (state.serviceType === "delivery" && !deliveryReady()) openDeliveryDialog();
   }));
+  ticket.querySelector("#editDelivery")?.addEventListener("click", () => openDeliveryDialog());
   ticket.querySelector("#commentButton").addEventListener("click", openCommentDialog);
   ticket.querySelector("#removeComment")?.addEventListener("click", () => {
     state.comment = "";
     renderTicket();
   });
-  ticket.querySelector("#payButton").addEventListener("click", () => openPaymentDialog({ kind: "sale", total }));
+  ticket.querySelector("#payButton").addEventListener("click", () => {
+    const pay = () => openPaymentDialog({ kind: "sale", total });
+    if (state.serviceType === "delivery" && !deliveryReady()) openDeliveryDialog(pay);
+    else pay();
+  });
 }
 
 function resetSale() {
   state.cart = [];
   state.comment = "";
   state.serviceType = "dine_in";
+  state.customerPhone = "";
+  state.deliveryAddress = "";
+  state.saveCustomer = true;
   renderTicket();
+}
+
+// --- delivery ---------------------------------------------------------------------
+
+const PHONE_MIN_DIGITS = 5;
+const PHONE_MAX_DIGITS = 15;
+const ADDRESS_MAX_LENGTH = 200;
+const CUSTOMER_SEARCH_DELAY_MS = 250;
+
+function deliveryReady() {
+  return state.customerPhone.length >= PHONE_MIN_DIGITS && Boolean(state.deliveryAddress);
+}
+
+// Fields of a sale that only a delivery has.
+function deliveryFields() {
+  if (state.serviceType !== "delivery") return {};
+  return { customer_phone: state.customerPhone, delivery_address: state.deliveryAddress, save_customer: state.saveCustomer };
+}
+
+async function findCustomers(digits) {
+  if (digits.length < 3) return [];
+  if (state.offline || !state.token) return offline.findCustomers(digits);
+  try {
+    return await api(`/api/pos/customers?phone=${encodeURIComponent(digits)}`);
+  } catch (exc) {
+    if (exc.offline) return offline.findCustomers(digits);
+    throw exc;
+  }
+}
+
+// Phone and address of the customer. A saved customer's address is filled in from the phone
+// number; the cashier can change it, and the new address is saved with the sale.
+function openDeliveryDialog(onDone) {
+  const modal = openModal(`
+    <div class="modal-head"><h3>Доставка</h3><button class="modal-close" data-close>×</button></div>
+    <div class="delivery-fields">
+      <label class="field"><span>Телефон клиента</span><input id="deliveryPhone" inputmode="none" autocomplete="off" maxlength="${PHONE_MAX_DIGITS + 3}" placeholder="93 123 45 67" value="${escapeHtml(state.customerPhone)}"></label>
+      <label class="field"><span>Адрес доставки</span><textarea id="deliveryAddress" inputmode="none" autocomplete="off" rows="2" maxlength="${ADDRESS_MAX_LENGTH}" placeholder="Улица, дом, подъезд, квартира, ориентир">${escapeHtml(state.deliveryAddress)}</textarea></label>
+    </div>
+    <div class="customer-matches" id="customerMatches"></div>
+    <div id="deliveryKeys"></div>
+    <div class="modal-actions delivery-actions">
+      <label class="check-row"><input type="checkbox" id="saveCustomer" ${state.saveCustomer ? "checked" : ""}> Запомнить клиента</label>
+      <p class="form-error" id="deliveryError"></p>
+      <button class="btn" data-close>Отмена</button>
+      <button class="btn btn-primary" id="saveDelivery">Готово</button>
+    </div>`, { wide: true });
+  modal.classList.add("delivery-modal");
+  const phoneInput = modal.querySelector("#deliveryPhone");
+  const addressInput = modal.querySelector("#deliveryAddress");
+  const keys = modal.querySelector("#deliveryKeys");
+  const error = modal.querySelector("#deliveryError");
+  let active = null;
+  let matches = [];
+  // The address was typed by the cashier (kept) or filled in from a saved customer (replaced).
+  let addressTyped = Boolean(addressInput.value);
+  let addressFilled = false;
+  let searchTimer;
+  let searchId = 0;
+
+  const drawMatches = () => {
+    const digits = normalizePhone(phoneInput.value);
+    const known = matches.find((customer) => customer.phone === digits);
+    const others = matches.filter((customer) => customer !== known);
+    let status = "";
+    if (known) status = `<span class="match-status known">Постоянный клиент · заказов: ${known.orders_count}</span>`;
+    else if (digits.length >= 9) status = `<span class="match-status new">Новый клиент</span>`;
+    modal.querySelector("#customerMatches").innerHTML = status + others.map((customer, index) => `
+      <button type="button" data-match="${index}"><strong>${escapeHtml(receipts.phone(customer.phone))}</strong><small>${escapeHtml(customer.address)}</small></button>`).join("");
+    modal.querySelectorAll("[data-match]").forEach((button) => button.addEventListener("click", () => {
+      const customer = others[Number(button.dataset.match)];
+      phoneInput.value = customer.phone;
+      addressInput.value = customer.address;
+      addressTyped = false;
+      addressFilled = true;
+      matches = [customer];
+      drawMatches();
+      focusField("address");
+    }));
+  };
+
+  const search = async () => {
+    const digits = normalizePhone(phoneInput.value);
+    const id = ++searchId;
+    let found = [];
+    try { found = await findCustomers(digits); } catch { /* typed by hand then */ }
+    if (id !== searchId || !modal.isConnected) return;
+    matches = found;
+    const known = matches.find((customer) => customer.phone === digits);
+    if (known && !addressTyped) {
+      addressInput.value = known.address;
+      addressFilled = true;
+    } else if (!known && addressFilled) {
+      addressInput.value = "";
+      addressFilled = false;
+    }
+    drawMatches();
+  };
+
+  const focusField = (field) => {
+    const input = field === "phone" ? phoneInput : addressInput;
+    if (active !== field) {
+      active = field;
+      keys.innerHTML = "";
+      if (field === "phone") {
+        keys.innerHTML = `<div class="phone-pad">${keypadHtml()}</div>`;
+        keys.querySelector(".phone-pad").addEventListener("mousedown", (event) => event.preventDefault());
+        bindKeypad(keys, (key) => {
+          if (key === "C") {
+            phoneInput.value = "";
+            phoneInput.dispatchEvent(new Event("input", { bubbles: true }));
+          } else if (key === "⌫") eraseFrom(phoneInput);
+          else typeInto(phoneInput, key);
+          phoneInput.focus();
+        });
+      } else {
+        const holder = document.createElement("div");
+        keys.append(holder);
+        mountKeyboard(holder, () => addressInput);
+      }
+    }
+    if (document.activeElement !== input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  };
+
+  phoneInput.addEventListener("focus", () => focusField("phone"));
+  addressInput.addEventListener("focus", () => focusField("address"));
+  phoneInput.addEventListener("input", () => {
+    const digits = phoneInput.value.replace(/\D/g, "");
+    if (digits !== phoneInput.value) phoneInput.value = digits;
+    error.textContent = "";
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(search, CUSTOMER_SEARCH_DELAY_MS);
+  });
+  addressInput.addEventListener("input", () => {
+    addressTyped = Boolean(addressInput.value);
+    addressFilled = false;
+    error.textContent = "";
+  });
+  modal.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => {
+    window.clearTimeout(searchTimer);
+    closeModal();
+    renderTicket();
+  }));
+  modal.querySelector("#saveDelivery").addEventListener("click", () => {
+    const phone = normalizePhone(phoneInput.value);
+    const address = addressInput.value.replace(/\s+/g, " ").trim();
+    if (phone.length < PHONE_MIN_DIGITS || phone.length > PHONE_MAX_DIGITS) {
+      error.textContent = "Введите номер телефона клиента.";
+      focusField("phone");
+      return;
+    }
+    if (!address) {
+      error.textContent = "Введите адрес доставки.";
+      focusField("address");
+      return;
+    }
+    window.clearTimeout(searchTimer);
+    state.serviceType = "delivery";
+    state.customerPhone = phone;
+    state.deliveryAddress = address;
+    state.saveCustomer = modal.querySelector("#saveCustomer").checked;
+    closeModal();
+    renderTicket();
+    onDone?.();
+  });
+  focusField(phoneInput.value ? "address" : "phone");
+  if (phoneInput.value) search();
 }
 
 function openWeightedDialog(product) {
@@ -925,6 +1194,7 @@ function openPaymentDialog(target) {
             })),
             service_type: state.serviceType,
             comment: state.comment,
+            ...deliveryFields(),
           },
         });
         resetSale();
@@ -973,6 +1243,8 @@ async function sellOffline(payment, idempotencyKey) {
     paid_at: now,
     service_type: state.serviceType,
     comment: state.comment,
+    customer_phone: deliveryFields().customer_phone,
+    delivery_address: deliveryFields().delivery_address,
     subtotal: total,
     discount: 0,
     total,
@@ -1006,6 +1278,7 @@ async function sellOffline(payment, idempotencyKey) {
     amount_received: payment.amount_received,
     service_type: state.serviceType,
     comment: state.comment,
+    ...deliveryFields(),
     print_receipt: false,
     send_to_kitchen: false,
     printed: false,
@@ -1016,6 +1289,7 @@ async function sellOffline(payment, idempotencyKey) {
     showToast(exc.message, true);
     return;
   }
+  if (operation.save_customer) offline.rememberCustomer(operation.customer_phone, operation.delivery_address);
   resetSale();
   const notes = [];
   const settings = data.printer;
@@ -1061,7 +1335,12 @@ function itemsSummary(order) {
   }).join("");
 }
 
-const SERVICE_LABELS = { dine_in: "В зале", takeaway: "С собой" };
+const SERVICE_LABELS = { dine_in: "В зале", takeaway: "С собой", delivery: "Доставка" };
+
+function deliveryHtml(order) {
+  if (!order.delivery_address) return "";
+  return `<div class="order-delivery">📞 ${escapeHtml(receipts.phone(order.customer_phone || ""))}<br>📍 ${escapeHtml(order.delivery_address)}</div>`;
+}
 
 function renderKioskOrders(body) {
   body.innerHTML = `
@@ -1105,6 +1384,7 @@ function renderKitchen(body) {
     <article class="order-card ${order.kitchen_status === "ready" ? "is-ready" : ""}">
       <div class="order-card-head"><span class="order-number">№ ${escapeHtml(order.order_number)}</span><span class="order-meta">${formatTime(order.created_at)} · ${order.source === "kiosk" ? "Киоск" : "Касса"}${order.service_type ? ` · ${SERVICE_LABELS[order.service_type]}` : ""}</span></div>
       <ul class="order-items">${itemsSummary(order)}</ul>
+      ${deliveryHtml(order)}
       ${order.comment ? `<div class="order-comment">💬 ${escapeHtml(order.comment)}</div>` : ""}
       ${order.kitchen_status === "preparing"
         ? `<button class="btn btn-green" data-kitchen="${escapeHtml(order.order_ref)}" data-status="ready">Готово</button>`
@@ -1177,7 +1457,7 @@ async function renderHistory(body) {
         <tr>
           <td><strong>${escapeHtml(order.order_number)}</strong></td>
           <td>${formatDateTime(order.created_at)}</td>
-          <td>${order.source === "pos" ? "Касса" : "Киоск"}</td>
+          <td>${order.source === "pos" ? "Касса" : "Киоск"}${order.service_type === "delivery" ? " · Доставка" : ""}</td>
           <td><span class="status status-${order.payment_status}">${STATUS_LABELS[order.payment_status] || order.payment_status}</span></td>
           <td style="text-align:right"><strong>${money(order.total)}</strong>${order.discount ? `<br><small class="order-meta">скидка ${moneyText(order.discount)}</small>` : ""}</td>
           <td class="actions">

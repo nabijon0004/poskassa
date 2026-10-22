@@ -206,7 +206,7 @@ class PrintInput(BaseModel):
     order_ref: str = Field(pattern=r"^[A-Z0-9-]{1,40}$")
 
 
-SERVICE_TYPE_LABELS = {"dine_in": "В зале", "takeaway": "С собой"}
+SERVICE_TYPE_LABELS = {"dine_in": "В зале", "takeaway": "С собой", "delivery": "Доставка"}
 PAYMENT_METHOD_LABELS = {"cash": "Наличные", "card": "Карта"}
 PAYMENT_STATUS_LABELS = {
     "unpaid": "не оплачено",
@@ -880,6 +880,26 @@ def receipt_item_lines(
     return lines
 
 
+def format_phone(digits: str) -> str:
+    """A local Tajik number (9 digits) as "93 123 45 67"; other numbers as they are."""
+    if len(digits) == 9:
+        return f"{digits[:2]} {digits[2:5]} {digits[5:7]} {digits[7:]}"
+    return digits
+
+
+def delivery_lines(order: dict[str, Any], columns: int, *, bold: bool) -> list[dict[str, Any]]:
+    """The customer's phone and address on the kitchen ticket and the receipt."""
+    lines = []
+    if order.get("customer_phone"):
+        lines.append(_receipt_line(f"Тел.: {format_phone(order['customer_phone'])}"[:columns], bold=bold))
+    if order.get("delivery_address"):
+        for chunk in textwrap.wrap(
+            f"Адрес: {order['delivery_address']}", columns, subsequent_indent="       ", break_long_words=True
+        ):
+            lines.append(_receipt_line(chunk, bold=bold))
+    return lines
+
+
 def _amount_line(label: str, amount: float, columns: int, *, bold: bool = False) -> dict[str, Any]:
     value = format_receipt_money(amount)
     return _receipt_line(f"{label:<{columns - len(value) - 1}} {value}", bold=bold)
@@ -903,6 +923,7 @@ def build_customer_receipt(
     service_label = SERVICE_TYPE_LABELS.get(order.get("service_type") or "")
     if service_label:
         lines.append(_receipt_line(service_label, align="center"))
+    lines.extend(delivery_lines(order, columns, bold=False))
     lines.append(separator)
     lines.extend(receipt_item_lines(order["items"], columns, show_prices=True))
     lines.append(separator)
@@ -962,6 +983,8 @@ def build_receipt(order: dict[str, Any], settings: PrinterSettings) -> list[dict
     if receipt.show_time:
         created = datetime.fromisoformat(order["created_at"]).astimezone()
         lines.append(_receipt_line(created.strftime("%d.%m.%Y %H:%M"), align="center"))
+    # The courier needs the address whatever the receipt settings are.
+    lines.extend(delivery_lines(order, columns, bold=True))
 
     item_height = 2 if receipt.items_large else 1
     if receipt.show_items:
@@ -1153,6 +1176,9 @@ def initialize_db() -> None:
             "store_seq": "INTEGER",
             # Number printed by a register that sold the order without internet (О12).
             "offline_number": "TEXT",
+            # Delivery orders of the cash register: the customer's phone (digits) and address.
+            "customer_phone": "TEXT NOT NULL DEFAULT ''",
+            "delivery_address": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in payment_columns.items():
             if name not in columns:
@@ -1395,6 +1421,8 @@ def public_order(row: sqlite3.Row) -> dict[str, Any]:
         "kitchen_status": row["kitchen_status"] or None,
         "ready_at": row["ready_at"],
         "offline_number": row["offline_number"],
+        "customer_phone": row["customer_phone"] or None,
+        "delivery_address": row["delivery_address"] or None,
     }
 
 
