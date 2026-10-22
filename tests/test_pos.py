@@ -400,3 +400,51 @@ def test_register_sells_weighted_portions_up_to_11_kg(client):
     too_heavy = sell(client, headers, {"items": [{**portion, "portion_value": 11001}], "payment_method": "card"})
     assert too_heavy.status_code == 422
     assert "11 кг" in too_heavy.json()["detail"]
+
+
+def test_delivery_saves_the_customer_and_fills_the_address_by_phone(client, monkeypatch):
+    add_cashier(client)
+    headers = login(client)
+    open_shift(client, headers)
+    delivery = {"items": [{"product_id": "108", "quantity": 1}], "payment_method": "card", "service_type": "delivery"}
+
+    assert sell(client, headers, delivery).status_code == 422
+    assert sell(client, headers, {**delivery, "customer_phone": "93 123 45 67"}).status_code == 422
+    assert client.get("/api/pos/customers?phone=931", headers=headers).json() == []
+
+    use_printer(monkeypatch)
+    first = sell(
+        client, headers,
+        {**delivery, "customer_phone": "+992 93 123-45-67", "delivery_address": "  ул. Рудаки 10,\nкв. 5 ", "print_receipt": True},
+    )
+    assert first.status_code == 201, first.text
+    order = first.json()
+    assert order["service_type"] == "delivery"
+    assert order["customer_phone"] == "931234567"
+    assert order["delivery_address"] == "ул. Рудаки 10, кв. 5"
+    kitchen, receipt = take_print_jobs(client)[1]
+    for ticket in (kitchen, receipt):
+        for text in ("Тел.: 93 123 45 67", "Адрес: ул. Рудаки 10, кв. 5"):
+            assert text.encode("cp866") in ticket
+    assert "ДОСТАВКА".encode("cp866") in kitchen
+
+    [customer] = client.get("/api/pos/customers?phone=4567", headers=headers).json()
+    assert customer["phone"] == "931234567"
+    assert customer["address"] == "ул. Рудаки 10, кв. 5"
+    assert customer["orders_count"] == 1
+    assert client.get("/api/pos/customers?phone=4567").status_code == 401
+
+    # A new address replaces the saved one; a declined save keeps it.
+    sell(client, headers, {**delivery, "customer_phone": "931234567", "delivery_address": "пр. Сомони 3"})
+    sell(client, headers, {**delivery, "customer_phone": "931234567", "delivery_address": "Офис", "save_customer": False})
+    sell(client, headers, {**delivery, "customer_phone": "931234500", "delivery_address": "ул. Айни 1"})
+    found = client.get("/api/pos/customers?phone=+992931234567", headers=headers).json()
+    assert [(entry["phone"], entry["address"], entry["orders_count"]) for entry in found] == [
+        ("931234567", "пр. Сомони 3", 2),
+    ]
+    assert len(client.get("/api/pos/customers?phone=93123", headers=headers).json()) == 2
+
+    # Other service types do not keep a phone or an address.
+    takeaway = sell(client, headers, {**delivery, "service_type": "takeaway", "customer_phone": "900000000", "delivery_address": "x"})
+    assert takeaway.json()["customer_phone"] is None
+    assert client.get("/api/pos/customers?phone=900000000", headers=headers).json() == []

@@ -111,3 +111,20 @@ def test_wrong_register_clock_is_replaced_by_server_time(client):
     orders = client.get("/api/admin/report/orders?store_id=1", headers=ADMIN).json()["orders"]
     order = next(order for order in orders if order["order_ref"] == result["order_ref"])
     assert datetime.fromisoformat(order["created_at"]) < datetime.now(timezone.utc) + timedelta(minutes=1)
+
+
+def test_offline_delivery_saves_the_customer_once(client):
+    cashier = add_cashier(client)
+    open_shift(client, login(client))
+    operation = sale_operation(
+        cashier["id"], datetime.now(timezone.utc),
+        service_type="delivery", customer_phone="931234567", delivery_address="ул. Рудаки 10",
+    )
+    assert sync(client, [operation])[0]["status"] == "ok"
+    assert sync(client, [operation])[0]["status"] == "ok"
+    [customer] = client.get("/api/pos/offline-data", headers=REGISTER).json()["customers"]
+    assert customer["phone"] == "931234567"
+    assert customer["address"] == "ул. Рудаки 10"
+    assert customer["orders_count"] == 1
+    orders = client.get("/api/admin/report/orders?store_id=1", headers=ADMIN).json()["orders"]
+    assert orders[0]["delivery_address"] == "ул. Рудаки 10"

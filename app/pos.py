@@ -20,7 +20,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import app.main as core
 from app import queue_screen, stores, telegram
@@ -33,6 +33,9 @@ LOGIN_MAX_FAILURES = 10
 PIN_PATTERN = r"^\d{4,6}$"
 # The receipts tab shows only the latest receipts.
 RECENT_RECEIPTS_LIMIT = 15
+# Customers found by a part of the phone number while the cashier types it.
+CUSTOMER_SEARCH_MIN_DIGITS = 3
+CUSTOMER_SEARCH_LIMIT = 6
 
 # token -> (cashier_id, register_id, expires_at). Cashiers log in again after a server restart.
 _sessions: dict[str, tuple[int, int, float]] = {}
@@ -98,16 +101,54 @@ class PaymentFields(BaseModel):
     print_receipt: bool = True
 
 
+def normalize_phone(value: str) -> str:
+    """Digits only; +992 of a Tajik number is dropped so both spellings find one customer."""
+    digits = "".join(char for char in value if char in "0123456789")
+    if len(digits) == 12 and digits.startswith("992"):
+        digits = digits[3:]
+    return digits
+
+
+def normalize_address(value: str) -> str:
+    return " ".join(core.OrderInput.normalize_comment(value).split())
+
+
 class SaleInput(PaymentFields):
     items: list[core.OrderLineInput] = Field(min_length=1, max_length=100)
-    service_type: Literal["dine_in", "takeaway"] | None = None
+    service_type: Literal["dine_in", "takeaway", "delivery"] | None = None
     comment: str = Field(default="", max_length=100)
     send_to_kitchen: bool = True
+    # Delivery: the customer's phone and address; saved for the next order unless declined.
+    customer_phone: str = Field(default="", max_length=30)
+    delivery_address: str = Field(default="", max_length=200)
+    save_customer: bool = True
 
     @field_validator("comment")
     @classmethod
     def normalize_comment(cls, value: str) -> str:
         return core.OrderInput.normalize_comment(value)
+
+    @field_validator("customer_phone")
+    @classmethod
+    def phone_digits(cls, value: str) -> str:
+        return normalize_phone(value)
+
+    @field_validator("delivery_address")
+    @classmethod
+    def address_text(cls, value: str) -> str:
+        return normalize_address(value)
+
+    @model_validator(mode="after")
+    def delivery_details(self) -> SaleInput:
+        if self.service_type != "delivery":
+            self.customer_phone = ""
+            self.delivery_address = ""
+            return self
+        if not 5 <= len(self.customer_phone) <= 15:
+            raise ValueError("Укажите телефон клиента.")
+        if not self.delivery_address:
+            raise ValueError("Укажите адрес доставки.")
+        return self
 
 
 class PayOrderInput(PaymentFields):
@@ -187,6 +228,22 @@ def initialize_pos_tables(connection: sqlite3.Connection, default_store_id: int)
         },
     )
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS shifts_client_id ON shifts (client_id)")
+    # Delivery customers of a store: the address is filled in by the phone number.
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_id INTEGER NOT NULL,
+            phone TEXT NOT NULL,
+            address TEXT NOT NULL DEFAULT '',
+            orders_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            -- NULL for a customer added in the admin panel who has not ordered yet.
+            last_order_at TEXT,
+            UNIQUE (store_id, phone)
+        )
+        """
+    )
     # Shifts from before registers existed belong to the first register of their store.
     connection.execute(
         """
@@ -277,6 +334,40 @@ def pos_order(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "cashier_name": cashier_name(connection, row["cashier_id"]),
         "register_name": device_name(connection, row["register_id"]),
     }
+
+
+def save_customer(connection: sqlite3.Connection, store_id: int, phone: str, address: str, at: str) -> None:
+    """Remember the customer's latest address for the next delivery."""
+    connection.execute(
+        """
+        INSERT INTO customers (store_id, phone, address, orders_count, created_at, last_order_at)
+        VALUES (?, ?, ?, 1, ?, ?)
+        ON CONFLICT (store_id, phone) DO UPDATE SET
+            address = excluded.address,
+            orders_count = customers.orders_count + 1,
+            last_order_at = MAX(COALESCE(customers.last_order_at, ''), excluded.last_order_at)
+        """,
+        (store_id, phone, address, at, at),
+    )
+
+
+def public_customer(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "phone": row["phone"],
+        "address": row["address"],
+        "orders_count": row["orders_count"],
+        "created_at": row["created_at"],
+        "last_order_at": row["last_order_at"],
+    }
+
+
+def remember_delivery_customer(store_id: int, sale: SaleInput, at: str) -> None:
+    if sale.service_type != "delivery" or not sale.save_customer:
+        return
+    with closing(core.connect_db()) as connection:
+        save_customer(connection, store_id, sale.customer_phone, sale.delivery_address, at)
+        connection.commit()
 
 
 # --- auth --------------------------------------------------------------------------
@@ -657,7 +748,7 @@ def create_sale(
     with closing(core.connect_db()) as connection:
         shift = require_open_shift(connection, context)
     request_hash = hashlib.sha256(
-        payload.model_dump_json(exclude={"print_receipt", "send_to_kitchen"}).encode()
+        payload.model_dump_json(exclude={"print_receipt", "send_to_kitchen", "save_customer"}).encode()
     ).hexdigest()
     paid_at = now_iso()
     row, created = core.store_order(
@@ -669,6 +760,8 @@ def create_sale(
             "created_at": paid_at,
             "comment": payload.comment,
             "service_type": payload.service_type or "",
+            "customer_phone": payload.customer_phone,
+            "delivery_address": payload.delivery_address,
             "source": "pos",
             "payment_status": "paid",
             "payment_method": payment["payment_method"],
@@ -689,6 +782,7 @@ def create_sale(
         order = pos_order(connection, row)
     if not created:
         return order
+    remember_delivery_customer(context.store_id, payload, paid_at)
     if payload.send_to_kitchen:
         try:
             core.OrderPrinter.print_order(order, context.store_id)
@@ -703,6 +797,24 @@ def create_sale(
         else "not_requested"
     )
     return order
+
+
+@router.get("/api/pos/customers")
+def find_customers(phone: str = "", x_pos_token: PosToken = None) -> list[dict[str, Any]]:
+    """Saved customers whose phone contains the typed digits; the exact number comes first."""
+    context = require_cashier(x_pos_token)
+    digits = normalize_phone(phone)
+    if len(digits) < CUSTOMER_SEARCH_MIN_DIGITS:
+        return []
+    with closing(core.connect_db()) as connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM customers WHERE store_id = ? AND instr(phone, ?) > 0
+            ORDER BY phone = ? DESC, last_order_at DESC LIMIT ?
+            """,
+            (context.store_id, digits, digits, CUSTOMER_SEARCH_LIMIT),
+        ).fetchall()
+    return [public_customer(row) for row in rows]
 
 
 def load_order(connection: sqlite3.Connection, context: PosContext, order_ref: str) -> sqlite3.Row:

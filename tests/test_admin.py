@@ -386,3 +386,50 @@ def test_admin_manages_store_categories(client):
     assert client.delete(f"{base}/{custom['id']}", headers=ADMIN).status_code == 204
     assert custom["id"] not in main.catalog_for(1).category_by_id
     assert client.delete(f"{base}/{custom['id']}", headers=ADMIN).status_code == 404
+
+
+def test_delivery_customers_are_listed_and_edited_in_the_admin_panel(client):
+    from tests.test_pos import add_cashier as add_store_cashier, login, open_shift, sell
+
+    url = "/api/admin/stores/1/customers"
+    assert client.get(url).status_code == 401
+    assert client.post(url, headers=ADMIN, json={"phone": "12", "address": "ул. Айни 1"}).status_code == 422
+    assert client.post(url, headers=ADMIN, json={"phone": "931112233", "address": "  "}).status_code == 422
+    added = client.post(url, headers=ADMIN, json={"phone": "+992 93 111 22 33", "address": "ул. Айни 1"})
+    assert added.status_code == 201, added.text
+    customer = added.json()
+    assert (customer["phone"], customer["orders_count"], customer["last_order_at"]) == ("931112233", 0, None)
+    assert client.post(url, headers=ADMIN, json={"phone": "931112233", "address": "x"}).status_code == 409
+
+    # A delivery from the register finds the added customer and counts the order.
+    add_store_cashier(client)
+    headers = login(client)
+    open_shift(client, headers)
+    sale = {"items": [{"product_id": "108", "quantity": 1}], "payment_method": "card", "service_type": "delivery"}
+    assert sell(client, headers, {**sale, "customer_phone": "931112233", "delivery_address": "ул. Айни 2"}).status_code == 201
+    assert sell(client, headers, {**sale, "customer_phone": "900000001", "delivery_address": "50% скидка_дом"}).status_code == 201
+
+    listed = client.get(url, headers=ADMIN).json()
+    assert listed["total"] == 2
+    assert {entry["phone"]: entry["orders_count"] for entry in listed["customers"]} == {"931112233": 1, "900000001": 1}
+    assert [entry["phone"] for entry in client.get(f"{url}?q=2233", headers=ADMIN).json()["customers"]] == ["931112233"]
+    assert [entry["address"] for entry in client.get(f"{url}?q=АЙНИ", headers=ADMIN).json()["customers"]] == ["ул. Айни 2"]
+    assert [entry["phone"] for entry in client.get(f"{url}?q=%25", headers=ADMIN).json()["customers"]] == ["900000001"]
+
+    [order] = client.get(f"{url}/{customer['id']}/orders", headers=ADMIN).json()
+    assert order["delivery_address"] == "ул. Айни 2"
+
+    other = next(entry for entry in listed["customers"] if entry["phone"] == "900000001")
+    assert client.put(f"{url}/{customer['id']}", headers=ADMIN, json={"phone": "900000001"}).status_code == 409
+    edited = client.put(f"{url}/{customer['id']}", headers=ADMIN, json={"address": "ул. Айни 3, кв. 7"}).json()
+    assert (edited["phone"], edited["address"]) == ("931112233", "ул. Айни 3, кв. 7")
+    [found] = client.get("/api/pos/customers?phone=931112233", headers=headers).json()
+    assert found["address"] == "ул. Айни 3, кв. 7"
+
+    assert client.delete(f"{url}/{other['id']}", headers=ADMIN).status_code == 204
+    assert client.delete(f"{url}/{other['id']}", headers=ADMIN).status_code == 404
+    assert client.get(url, headers=ADMIN).json()["total"] == 1
+    # Another store does not see them.
+    store = create_store(client)
+    assert client.get(f"/api/admin/stores/{store['id']}/customers", headers=ADMIN).json()["total"] == 0
+    assert client.get(f"/api/admin/stores/{store['id']}/customers/{customer['id']}/orders", headers=ADMIN).status_code == 404

@@ -99,7 +99,7 @@ input { font: inherit; }
 .sum-row { display: flex; justify-content: space-between; align-items: center; }
 .sum-row.total { font-size: 26px; font-weight: 800; }
 .sum-row.discount { color: var(--green); font-weight: 700; }
-.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px; border-radius: 14px; background: var(--paper); }
+.segmented { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; padding: 4px; border-radius: 14px; background: var(--paper); }
 .segmented button { min-height: 44px; border: 0; border-radius: 11px; background: transparent; font-weight: 700; }
 .segmented button.active { background: var(--white); box-shadow: 0 1px 4px rgba(35, 32, 27, .15); }
 .ticket-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -217,3 +217,40 @@ table.history td.actions { display: flex; gap: 6px; justify-content: flex-end; }
 .ticket-comment button { flex: 0 0 auto; width: 28px; height: 28px; border: 0; border-radius: 50%; background: rgba(35, 32, 27, .08); font-size: 16px; line-height: 1; }
 .comment-input { width: 100%; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--white); font: inherit; font-size: 17px; resize: vertical; }
 .comment-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Delivery: customer's phone and address, typed on the on-screen keyboard. */
+.delivery-info { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); }
+.delivery-info div { display: grid; gap: 2px; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.delivery-info .btn { flex: 0 0 auto; }
+.delivery-missing { min-height: 46px; border: 2px dashed var(--accent); border-radius: 12px; color: var(--accent-dark); background: var(--accent-pale); font-weight: 700; }
+.order-delivery { padding: 8px 10px; border-radius: 10px; background: var(--paper); font-size: 14px; overflow-wrap: anywhere; }
+.modal.delivery-modal { width: min(980px, 100%); padding: 18px; }
+.delivery-modal .modal-head { margin-bottom: 10px; }
+.delivery-fields { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; }
+.field { display: grid; align-content: start; gap: 6px; color: var(--muted); font-size: 14px; font-weight: 700; }
+.field input, .field textarea { width: 100%; min-height: 60px; padding: 12px 14px; border: 2px solid var(--line); border-radius: 14px; background: var(--white); color: var(--ink); font: inherit; font-size: 18px; font-weight: 700; resize: none; }
+.field input { font-size: 24px; letter-spacing: .04em; }
+.field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); }
+.customer-matches { display: flex; align-items: center; gap: 8px; min-height: 52px; margin: 8px 0; overflow-x: auto; }
+.customer-matches button { flex: 0 0 auto; display: grid; max-width: 260px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); text-align: left; }
+.customer-matches small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.match-status { flex: 0 0 auto; padding: 8px 12px; border-radius: 999px; font-size: 14px; font-weight: 700; }
+.match-status.known { color: var(--green); background: var(--green-pale); }
+.match-status.new { color: var(--amber); background: var(--amber-pale); }
+.phone-pad { width: min(420px, 100%); margin: 0 auto; }
+.phone-pad .keypad { gap: 8px; }
+.phone-pad .keypad button { min-height: 54px; }
+.vkeyboard { display: grid; gap: 6px; padding: 8px; border-radius: 16px; background: #e6e2da; user-select: none; }
+.vk-row { display: flex; gap: 6px; }
+.vk-row button { flex: 1 1 0; min-width: 0; min-height: 50px; padding: 0; border: 0; border-radius: 10px; background: var(--white); font-size: 20px; font-weight: 600; box-shadow: 0 2px 0 rgba(35, 32, 27, .15); }
+.vk-row button:active { background: var(--accent-pale); }
+.vk-row .vk-wide { flex-grow: 1.6; background: #d6d1c7; font-size: 16px; font-weight: 700; }
+.vk-row .vk-shift.active { color: white; background: var(--dark); }
+.vk-row .vk-space { flex-grow: 5; font-size: 16px; }
+.delivery-actions { align-items: center; margin-top: 12px; }
+.delivery-actions .check-row { margin-right: auto; }
+.delivery-actions .form-error { min-height: 0; margin: 0; }
+@media (max-width: 820px) {
+  .delivery-fields { grid-template-columns: 1fr; }
+  .vk-row button { font-size: 16px; }
+}
