@@ -141,8 +141,8 @@ function closeModal() {
   modalRoot.innerHTML = "";
 }
 
-function openModal(html, { wide = false } = {}) {
-  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="modal ${wide ? "wide" : ""}" role="dialog" aria-modal="true">${html}</section></div>`;
+function openModal(html, { wide = false, compact = false } = {}) {
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="modal ${wide ? "wide" : ""} ${compact ? "compact" : ""}" role="dialog" aria-modal="true">${html}</section></div>`;
   return modalRoot.querySelector(".modal");
 }
 
@@ -756,7 +756,7 @@ function openWeightedDialog(product) {
     <div class="amount-display" id="weightedValue"></div>
     <p class="hint" id="weightedHint"></p>
     ${keypadHtml({ decimal: true })}
-    <div class="modal-actions"><button class="btn" data-close>Отмена</button><button class="btn btn-primary" id="addWeighted">Добавить</button></div>`);
+    <div class="modal-actions"><button class="btn" data-close>Отмена</button><button class="btn btn-primary" id="addWeighted">Добавить</button></div>`, { compact: true });
   const portion = () => {
     if (!value || value.endsWith(",")) return null;
     if (mode === "weight") {

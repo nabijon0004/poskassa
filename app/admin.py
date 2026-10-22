@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 import app.main as core
 from app import pos, printing, queue_screen, stores
-from app.main import Product, ProductCreate, ProductUpdate
+from app.main import Category, CategoryInput, Product, ProductCreate, ProductUpdate
 
 router = APIRouter()
 
@@ -710,6 +710,80 @@ async def upload_product_image(
         raise
     # An uploaded photo may be shared with another store's copy of the product; keep it.
     return store_product(store_id, product_id)
+
+
+# --- categories ------------------------------------------------------------------
+
+
+def store_category(store_id: int, category_id: str) -> Category:
+    category = core.catalog_for(store_id).category_by_id.get(category_id)
+    if category is None:
+        raise HTTPException(status_code=404, detail="Категория не найдена.")
+    return category
+
+
+def category_name(store_id: int, name: str, *, exclude_id: str | None = None) -> str:
+    name = " ".join(name.split())
+    if not name:
+        raise HTTPException(status_code=422, detail="Укажите название категории.")
+    for category in core.catalog_for(store_id).categories:
+        if category.id != exclude_id and category.name.casefold() == name.casefold():
+            raise HTTPException(status_code=409, detail="Категория с таким названием уже есть.")
+    return name
+
+
+def is_custom_category(category_id: str) -> bool:
+    return all(category.id != category_id for category in core.BASE_CATEGORIES)
+
+
+def persist_category(store_id: int, category: Category, *, deleted: bool = False) -> None:
+    try:
+        core.save_category_setting(
+            store_id, category, is_custom=is_custom_category(category.id), deleted=deleted
+        )
+    except sqlite3.Error as exc:
+        core.logger.exception("Could not save category %s", category.id)
+        raise HTTPException(status_code=500, detail="Не удалось сохранить категорию.") from exc
+
+
+@router.post("/api/admin/stores/{store_id}/categories", status_code=201)
+def create_category(store_id: int, payload: CategoryInput, authorization: Authorization = None) -> Category:
+    require_store(authorization, store_id)
+    category = Category(
+        id=f"custom-{uuid.uuid4().hex[:12]}",
+        name=category_name(store_id, payload.name),
+        hidden=payload.hidden,
+    )
+    persist_category(store_id, category)
+    return store_category(store_id, category.id)
+
+
+@router.put("/api/admin/stores/{store_id}/categories/{category_id}")
+def update_category(
+    store_id: int, category_id: str, payload: CategoryInput, authorization: Authorization = None
+) -> Category:
+    require_store(authorization, store_id)
+    existing = store_category(store_id, category_id)
+    category = existing.model_copy(
+        update={"name": category_name(store_id, payload.name, exclude_id=category_id), "hidden": payload.hidden}
+    )
+    persist_category(store_id, category)
+    return store_category(store_id, category_id)
+
+
+@router.delete("/api/admin/stores/{store_id}/categories/{category_id}", status_code=204)
+def delete_category(store_id: int, category_id: str, authorization: Authorization = None) -> Response:
+    require_store(authorization, store_id)
+    catalog = core.catalog_for(store_id)
+    category = store_category(store_id, category_id)
+    count = sum(product.category_id == category_id for product in catalog.products)
+    if count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"В категории {count} тов. Перенесите их в другую категорию или скройте категорию.",
+        )
+    persist_category(store_id, category, deleted=True)
+    return Response(status_code=204)
 
 
 # --- printer ---------------------------------------------------------------------

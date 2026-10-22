@@ -561,12 +561,16 @@ function productRows(catalog, { query = "", categoryId = "" } = {}) {
       <img src="${escapeHtml(product.image)}" alt="" loading="lazy">
       <div class="product-info">
         <strong>${escapeHtml(product.name)}</strong>
-        <small>${escapeHtml(catalog.categories.find((category) => category.id === product.category_id)?.name || "Категория не найдена")} · ${money(product.price)} / ${escapeHtml(product.unit)}</small>
+        <small>${escapeHtml(categoryLabel(catalog.categories.find((category) => category.id === product.category_id) || { name: "Категория не найдена" }))} · ${money(product.price)} / ${escapeHtml(product.unit)}</small>
       </div>
       <span class="product-priority" title="Приоритет">${product.priority ? `№ ${product.priority}` : ""}</span>
       <span class="badge ${product.available ? "ok" : "off"}">${product.available ? "В продаже" : "Скрыт"}</span>
       <button class="btn btn-small" data-edit-product="${escapeHtml(product.id)}">Изменить</button>
     </div>`).join("") || `<p class="empty">Ничего не найдено.</p>`;
+}
+
+function categoryLabel(category) {
+  return category.hidden ? `${category.name} (скрыта)` : category.name;
 }
 
 function productEditorHtml(product, categories) {
@@ -578,7 +582,7 @@ function productEditorHtml(product, categories) {
       <div class="form-grid">
         <label class="field">Цена<input name="price" type="number" min="0" max="99999999.99" step="0.01" required value="${editing ? product.price : ""}"></label>
         <label class="field">Приоритет<input name="priority" type="number" min="1" max="999" step="1" placeholder="—" value="${product?.priority ?? ""}"><small>1 — первым в списке. Пусто — без приоритета.</small></label>
-        <label class="field">Категория<select name="category_id" required>${categories.map((category) => `<option value="${escapeHtml(category.id)}" ${(product?.category_id ?? state.productCategory) === category.id ? "selected" : ""}>${escapeHtml(category.name)}</option>`).join("")}</select></label>
+        <label class="field">Категория<select name="category_id" required>${categories.map((category) => `<option value="${escapeHtml(category.id)}" ${(product?.category_id ?? state.productCategory) === category.id ? "selected" : ""}>${escapeHtml(categoryLabel(category))}</option>`).join("")}</select></label>
         ${editing ? "" : `<label class="field">Единица<select name="unit"><option value="шт.">шт.</option><option value="кг">кг</option></select></label>`}
       </div>
       <label class="field">Состав<textarea name="ingredients" maxlength="300" rows="3" placeholder="Например: томатный соус, моцарелла, пепперони">${escapeHtml(product?.ingredients || "")}</textarea><small>Показывается покупателю на карточке товара.</small></label>
@@ -589,17 +593,17 @@ function productEditorHtml(product, categories) {
     </form>`;
 }
 
-async function renderProducts(page, storeId) {
+async function renderProducts(page, storeId, { showCategories = false } = {}) {
   const catalog = await api(`/api/admin/stores/${storeId}/products`);
   const store = storeById(storeId);
   page.innerHTML = `
-    ${pageHead(`Товары · ${store.name}`, "Общее меню из tovar.xlsx. Изменения цены, фото, состава и наличия действуют только в этой точке.", `<button class="btn btn-primary" id="addProduct">Добавить товар</button>`)}
+    ${pageHead(`Товары · ${store.name}`, "Общее меню из tovar.xlsx. Изменения цены, фото, состава, наличия и категорий действуют только в этой точке.", `<div class="btn-row"><button class="btn" id="manageCategories">Категории</button><button class="btn btn-primary" id="addProduct">Добавить товар</button></div>`)}
     <div id="productEditor"></div>
     <section class="card">
       <div class="product-filters">
         <select class="input" id="productCategory" aria-label="Категория">
           <option value="">Все категории (${catalog.products.length})</option>
-          ${catalog.categories.map((category) => `<option value="${escapeHtml(category.id)}" ${category.id === state.productCategory ? "selected" : ""}>${escapeHtml(category.name)} (${catalog.products.filter((product) => product.category_id === category.id).length})</option>`).join("")}
+          ${catalog.categories.map((category) => `<option value="${escapeHtml(category.id)}" ${category.id === state.productCategory ? "selected" : ""}>${escapeHtml(categoryLabel(category))} (${catalog.products.filter((product) => product.category_id === category.id).length})</option>`).join("")}
         </select>
         <input class="input" id="productSearch" type="search" placeholder="Поиск по названию">
       </div>
@@ -622,7 +626,9 @@ async function renderProducts(page, storeId) {
   categorySelect.addEventListener("change", showProducts);
   search.addEventListener("input", showProducts);
   page.querySelector("#addProduct").addEventListener("click", () => openEditor(null));
+  page.querySelector("#manageCategories").addEventListener("click", () => openCategoryManager(page, storeId, catalog));
   showProducts();
+  if (showCategories) openCategoryManager(page, storeId, catalog);
 
   function openEditor(product) {
     editor.innerHTML = productEditorHtml(product, catalog.categories);
@@ -663,6 +669,82 @@ async function renderProducts(page, storeId) {
       }
     });
   }
+}
+
+// --- categories --------------------------------------------------------------------
+
+function categoryRowHtml(category, count) {
+  return `
+    <div class="category-row" data-category-row="${escapeHtml(category.id)}">
+      <div class="product-info"><strong>${escapeHtml(category.name)}</strong><small>${count} тов.</small></div>
+      <span class="badge ${category.hidden ? "off" : "ok"}">${category.hidden ? "Скрыта" : "В меню"}</span>
+      <div class="btn-row">
+        <button class="btn btn-small" data-rename-category>Изменить</button>
+        <button class="btn btn-small" data-toggle-category>${category.hidden ? "Показать" : "Скрыть"}</button>
+        <button class="btn btn-small" data-delete-category ${count ? `disabled title="Сначала перенесите товары в другую категорию"` : ""}>Удалить</button>
+      </div>
+    </div>`;
+}
+
+// Add, rename, hide and delete the store's categories; the products page reloads after each change.
+function openCategoryManager(page, storeId, catalog) {
+  const count = (category) => catalog.products.filter((product) => product.category_id === category.id).length;
+  const modal = openModal("Категории товаров", `
+    <form id="categoryForm" class="category-add">
+      <input class="input" name="name" maxlength="60" required placeholder="Название новой категории" aria-label="Название новой категории">
+      <button class="btn btn-primary" type="submit">Добавить</button>
+    </form>
+    <p class="message" id="categoryMessage"></p>
+    <div class="category-list">${catalog.categories.map((category) => categoryRowHtml(category, count(category))).join("") || `<p class="empty">Категорий нет.</p>`}</div>
+    <p class="hint">Скрытая категория и её товары не показываются в киоске и на кассе. Удалить можно только пустую категорию.</p>`, { wide: true });
+  const save = async (request, done) => {
+    try {
+      await request();
+      showToast(done);
+      await renderProducts(page, storeId, { showCategories: true });
+    } catch (error) {
+      const message = modalRoot.querySelector("#categoryMessage");
+      if (message) setMessage(message, error.message, true);
+      else showToast(error.message, true);
+    }
+  };
+  modal.querySelector("#categoryForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = event.currentTarget.elements.name.value;
+    save(() => api(`/api/admin/stores/${storeId}/categories`, { method: "POST", body: { name } }), "Категория добавлена");
+  });
+  modal.querySelectorAll("[data-category-row]").forEach((row) => {
+    const category = catalog.categories.find((entry) => entry.id === row.dataset.categoryRow);
+    const path = `/api/admin/stores/${storeId}/categories/${encodeURIComponent(category.id)}`;
+    row.querySelector("[data-rename-category]").addEventListener("click", () => {
+      row.innerHTML = `
+        <form class="category-add">
+          <input class="input" name="name" maxlength="60" required value="${escapeHtml(category.name)}" aria-label="Название категории">
+          <div class="btn-row"><button class="btn btn-primary btn-small" type="submit">Сохранить</button><button class="btn btn-small" type="button" data-cancel>Отмена</button></div>
+        </form>`;
+      const input = row.querySelector("input");
+      input.focus();
+      input.select();
+      row.querySelector("[data-cancel]").addEventListener("click", () => openCategoryManager(page, storeId, catalog));
+      row.querySelector("form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        save(() => api(path, { method: "PUT", body: { name: input.value, hidden: category.hidden } }), "Категория сохранена");
+      });
+    });
+    row.querySelector("[data-toggle-category]").addEventListener("click", () => {
+      save(() => api(path, { method: "PUT", body: { name: category.name, hidden: !category.hidden } }), category.hidden ? "Категория показана" : "Категория скрыта");
+    });
+    row.querySelector("[data-delete-category]").addEventListener("click", async () => {
+      const confirmed = await confirmAction(`Удалить категорию «${category.name}»?`, "Категория исчезнет из меню этой точки.", "Удалить");
+      if (!confirmed) {
+        openCategoryManager(page, storeId, catalog);
+        return;
+      }
+      // The confirmation replaced the manager; reopen it so errors have a place to show.
+      openCategoryManager(page, storeId, catalog);
+      save(() => api(path, { method: "DELETE" }), "Категория удалена");
+    });
+  });
 }
 
 // --- printer -----------------------------------------------------------------------
