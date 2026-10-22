@@ -134,11 +134,16 @@ async function api(path, { method = "GET", body, headers = {} } = {}) {
     signOut(false);
     throw new Error(data.detail || "Сессия завершена. Войдите снова.");
   }
-  if (!response.ok) {
-    const detail = Array.isArray(data.detail) ? "Проверьте введённые данные." : data.detail;
-    throw new Error(detail || "Не удалось выполнить запрос.");
-  }
+  if (!response.ok) throw new Error(errorText(data.detail) || "Не удалось выполнить запрос.");
   return data;
+}
+
+// Field errors (422) carry the server's own message after "Value error, "; other
+// field errors are technical, in English.
+function errorText(detail) {
+  if (!Array.isArray(detail)) return detail;
+  const own = detail.map((error) => /^Value error, (.+)$/.exec(error.msg || "")?.[1]).find(Boolean);
+  return own || "Проверьте введённые данные. Если ошибка повторяется, обновите сервер кассы.";
 }
 
 function closeModal() {
