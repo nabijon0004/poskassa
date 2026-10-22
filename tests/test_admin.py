@@ -324,3 +324,65 @@ def test_report_lists_orders_with_details(client):
     headers = {"Authorization": f"Bearer {token}"}
     assert client.get("/api/admin/report/orders?store_id=1", headers=headers).status_code == 403
     assert client.get("/api/admin/report/orders", headers=headers).json() == {"total": 0, "orders": []}
+
+
+def test_admin_manages_store_categories(client):
+    base = "/api/admin/stores/1/categories"
+    product = main.catalog_for(1).product_by_id["4"]
+
+    created = client.post(base, headers=ADMIN, json={"name": "  Новинки  "})
+    assert created.status_code == 201, created.text
+    custom = created.json()
+    assert custom["name"] == "Новинки" and custom["hidden"] is False
+    assert client.post(base, headers=ADMIN, json={"name": "новинки"}).status_code == 409
+
+    renamed = client.put(f"{base}/{custom['id']}", headers=ADMIN, json={"name": "Хиты", "hidden": False})
+    assert renamed.status_code == 200 and renamed.json()["name"] == "Хиты"
+
+    # A product moved to the new category shows under it in the menu.
+    moved = client.put(
+        "/api/admin/stores/1/products/4",
+        headers=ADMIN,
+        json={"name": product.name, "category_id": custom["id"], "price": "13", "available": True},
+    )
+    assert moved.status_code == 200, moved.text
+    menu = client.get("/api/menu").json()
+    assert {"id": custom["id"], "name": "Хиты", "hidden": False} in menu["categories"]
+    assert next(p for p in menu["products"] if p["id"] == "4")["description"] == "Хиты"
+
+    # A non-empty category cannot be deleted.
+    assert client.delete(f"{base}/{custom['id']}", headers=ADMIN).status_code == 409
+
+    # A hidden category and its products leave the kiosk and register menus but stay in the admin panel.
+    hidden = client.put(f"{base}/{custom['id']}", headers=ADMIN, json={"name": "Хиты", "hidden": True})
+    assert hidden.status_code == 200 and hidden.json()["hidden"] is True
+    menu = client.get("/api/menu").json()
+    assert custom["id"] not in {category["id"] for category in menu["categories"]}
+    assert "4" not in {p["id"] for p in menu["products"]}
+    admin_catalog = client.get("/api/admin/stores/1/products", headers=ADMIN).json()
+    assert any(category["id"] == custom["id"] and category["hidden"] for category in admin_catalog["categories"])
+    rejected = client.post(
+        "/api/orders",
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+        json={"service_type": "takeaway", "items": [{"product_id": "4", "quantity": 1}]},
+    )
+    assert rejected.status_code == 409
+
+    # Workbook categories can be renamed too; another store keeps the original name.
+    other = create_store(client)
+    original = main.catalog_for(1).category_by_id[product.category_id].name
+    renamed_base = client.put(
+        f"{base}/{product.category_id}", headers=ADMIN, json={"name": "Переименовано", "hidden": False}
+    )
+    assert renamed_base.status_code == 200
+    assert main.catalog_for(other["id"]).category_by_id[product.category_id].name == original
+
+    # Moving the product back empties the custom category, which can then be deleted.
+    client.put(
+        "/api/admin/stores/1/products/4",
+        headers=ADMIN,
+        json={"name": product.name, "category_id": product.category_id, "price": "13", "available": True},
+    )
+    assert client.delete(f"{base}/{custom['id']}", headers=ADMIN).status_code == 204
+    assert custom["id"] not in main.catalog_for(1).category_by_id
+    assert client.delete(f"{base}/{custom['id']}", headers=ADMIN).status_code == 404

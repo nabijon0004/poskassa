@@ -89,6 +89,8 @@ class Product(BaseModel):
 class Category(BaseModel):
     id: str
     name: str
+    # Hidden categories stay in the admin panel but are left out of the kiosk and register menus.
+    hidden: bool = False
 
 
 class MenuResponse(BaseModel):
@@ -130,6 +132,13 @@ class ProductCreate(BaseModel):
     unit: str = Field(default="шт.", pattern=r"^(шт\.|кг)$")
     ingredients: str | None = Field(default=None, max_length=300)
     priority: int | None = Field(default=None, ge=1, le=999)
+
+
+class CategoryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=60)
+    hidden: bool = False
 
 
 class ReceiptSettings(BaseModel):
@@ -620,9 +629,30 @@ def catalog_for(store_id: int) -> Catalog:
     categories = [category.model_copy() for category in BASE_CATEGORIES]
     products = [product.model_copy(deep=True) for product in BASE_PRODUCTS]
     with closing(connect_db()) as connection:
+        saved_categories = connection.execute(
+            "SELECT * FROM category_settings WHERE store_id = ? ORDER BY rowid", (store_id,)
+        ).fetchall()
         saved_products = connection.execute(
             "SELECT * FROM product_settings WHERE store_id = ?", (store_id,)
         ).fetchall()
+
+    category_by_id = {category.id: category for category in categories}
+    deleted_categories: set[str] = set()
+    for saved in saved_categories:
+        if saved["deleted"]:
+            deleted_categories.add(saved["category_id"])
+            continue
+        category = category_by_id.get(saved["category_id"])
+        if category is None:
+            if not saved["is_custom"]:
+                continue
+            category = Category(id=saved["category_id"], name=saved["name"])
+            categories.append(category)
+            category_by_id[category.id] = category
+        category.name = saved["name"]
+        category.hidden = bool(saved["hidden"])
+    # A category is deleted only when empty, so its workbook products were moved elsewhere.
+    categories = [category for category in categories if category.id not in deleted_categories]
 
     product_by_id = {product.id: product for product in products}
     category_names = {category.id: category.name for category in categories}
@@ -677,6 +707,8 @@ def catalog_for(store_id: int) -> Catalog:
         if product.weighted:
             product.price = float(WEIGHTED_PRICE_PER_KG)
 
+    category_names = {category.id: category.name for category in categories}
+    products = [product for product in products if product.category_id in category_names]
     # Stable sort: equal priorities keep their workbook order.
     products.sort(key=lambda product: (product.priority is None, product.priority or 0))
     catalog = Catalog(categories, products)
@@ -721,6 +753,26 @@ def save_product_setting(store_id: int, product: Product, *, is_custom: bool) ->
                 ingredients_override,
                 product.priority,
             ),
+        )
+        connection.commit()
+    invalidate_catalog(store_id)
+
+
+def save_category_setting(
+    store_id: int, category: Category, *, is_custom: bool, deleted: bool = False
+) -> None:
+    with closing(connect_db()) as connection:
+        connection.execute(
+            """
+            INSERT INTO category_settings (store_id, category_id, name, hidden, deleted, is_custom)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(store_id, category_id) DO UPDATE SET
+                name = excluded.name,
+                hidden = excluded.hidden,
+                deleted = excluded.deleted,
+                is_custom = excluded.is_custom
+            """,
+            (store_id, category.id, category.name, int(category.hidden), int(deleted), int(is_custom)),
         )
         connection.commit()
     invalidate_catalog(store_id)
@@ -1112,6 +1164,20 @@ def initialize_db() -> None:
         )
         connection.execute("CREATE INDEX IF NOT EXISTS orders_store_created ON orders (store_id, created_at)")
         migrate_product_settings(connection, default_store_id)
+        # Per-store changes to the categories of tovar.xlsx, and the store's own categories.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS category_settings (
+                store_id INTEGER NOT NULL,
+                category_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                hidden INTEGER NOT NULL DEFAULT 0,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                is_custom INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (store_id, category_id)
+            )
+            """
+        )
         if connection.execute(
             "SELECT 1 FROM app_settings WHERE key = ?", (printer_settings_key(default_store_id),)
         ).fetchone() is None:
@@ -1194,7 +1260,10 @@ def resolve_order_items(
     for line in payload.items:
         product = catalog.product_by_id.get(line.product_id)
         # A sale made offline is recorded even if the product was hidden meanwhile.
-        if product is None or (require_available and not product.available):
+        if product is None or (
+            require_available
+            and (not product.available or catalog.category_by_id[product.category_id].hidden)
+        ):
             raise HTTPException(status_code=409, detail="Товар недоступен.")
 
         portion: dict[str, Any] | None = None
@@ -1458,11 +1527,12 @@ def health() -> dict[str, str]:
 
 def menu_response(store_id: int) -> MenuResponse:
     catalog = catalog_for(store_id)
+    visible = {category.id for category in catalog.categories if not category.hidden}
     return MenuResponse(
         currency=CURRENCY,
         max_order_total=float(MAX_ORDER_TOTAL),
-        categories=catalog.categories,
-        products=catalog.products,
+        categories=[category for category in catalog.categories if category.id in visible],
+        products=[product for product in catalog.products if product.category_id in visible],
     )
 
 
