@@ -504,6 +504,7 @@ def session_state(context: PosContext) -> dict[str, Any]:
         "currency": core.CURRENCY,
         "register": {"id": context.register_id, "name": context.register_name},
         "store": {"id": context.store_id, "name": context.store_name},
+        "print_customer_receipt": core.load_printer_settings(context.store_id).customer_receipt,
     }
 
 

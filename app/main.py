@@ -178,6 +178,8 @@ class PrinterSettings(BaseModel):
     chars_per_line: Literal[42, 48] = 48
     codepage: int = Field(default=17, ge=0, le=255)
     encoding: str = Field(default="cp866", min_length=1, max_length=20)
+    # Whether "print the customer's receipt" is ticked in the register's payment dialog.
+    customer_receipt: bool = True
     receipt: ReceiptSettings = Field(default_factory=ReceiptSettings)
 
     @field_validator("host", "system_name", "encoding")
@@ -1019,7 +1021,9 @@ RECEIPT_CHAR_REPLACEMENTS = str.maketrans({
 
 def render_escpos(lines: list[dict[str, Any]], settings: PrinterSettings) -> bytes:
     alignments = {"left": 0, "center": 1, "right": 2}
-    body = b"\x1b@" + b"\x1bt" + bytes((settings.codepage,))  # Init + code page.
+    # Init + code page + FS "." to leave the Chinese mode: printers sold with Chinese
+    # firmware (Xprinter) otherwise read Cyrillic bytes as GBK and print hieroglyphs.
+    body = b"\x1b@" + b"\x1bt" + bytes((settings.codepage,)) + b"\x1c."
     for line in lines:
         size = ((line["width"] - 1) << 4) | (line["height"] - 1)
         body += (
