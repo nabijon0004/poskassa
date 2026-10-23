@@ -339,7 +339,7 @@ const receipts = {
   // Same bytes as app/main.py render_escpos.
   escpos(lines, settings) {
     const alignments = { left: 0, center: 1, right: 2 };
-    const body = [0x1b, 0x40, 0x1b, 0x74, settings.codepage];
+    const body = [0x1b, 0x40, 0x1b, 0x74, settings.codepage, 0x1c, 0x2e];
     for (const line of lines) {
       const size = ((line.width - 1) << 4) | (line.height - 1);
       body.push(0x1b, 0x61, alignments[line.align], 0x1b, 0x45, line.bold ? 1 : 0, 0x1d, 0x21, size);

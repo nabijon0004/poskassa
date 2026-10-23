@@ -69,6 +69,17 @@ def test_cashiers_are_managed_by_staff_and_log_in_by_pin(client):
     assert client.post("/api/pos/login", headers=REGISTER, json={"pin": "1234"}).status_code == 401
 
 
+def test_staff_choose_whether_the_register_prints_the_customer_receipt(client):
+    add_cashier(client)
+    headers = login(client)
+    assert client.get("/api/pos/session", headers=headers).json()["print_customer_receipt"] is True
+
+    settings = client.get("/api/admin/stores/1/printer", headers=ADMIN).json()
+    settings["customer_receipt"] = False
+    assert client.put("/api/admin/stores/1/printer", headers=ADMIN, json=settings).status_code == 200
+    assert client.get("/api/pos/session", headers=headers).json()["print_customer_receipt"] is False
+
+
 def test_too_many_wrong_pins_are_throttled(client):
     add_cashier(client)
     for _ in range(pos.LOGIN_MAX_FAILURES):

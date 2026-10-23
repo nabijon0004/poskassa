@@ -805,6 +805,9 @@ function printerFormHtml(settings, agents) {
             <label class="field">Ожидание ответа, сек<input name="timeout" type="number" min="0.5" max="30" step="0.5" value="${settings.timeout}" required></label>
           </div>
         </details>
+        <h3>Касса</h3>
+        <label class="check"><input type="checkbox" name="customer_receipt" ${settings.customer_receipt ? "checked" : ""}> Печатать чек клиенту на кассе</label>
+        <small>Если выключено, касса печатает только заказ для кухни. Кассир может включить чек клиенту при оплате.</small>
         <h3>Дизайн чека для кухни</h3>
         <label class="field">Заголовок<input name="header" maxlength="48" value="${escapeHtml(receipt.header)}" placeholder="КУХНЯ"></label>
         <div class="form-grid">
@@ -849,6 +852,7 @@ function readPrinterForm(form) {
     chars_per_line: Number(value("chars_per_line")),
     codepage: Number(value("codepage")),
     encoding: value("encoding"),
+    customer_receipt: checked("customer_receipt"),
     receipt: {
       header: value("header"),
       number_size: Number(value("number_size")),

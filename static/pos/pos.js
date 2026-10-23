@@ -328,6 +328,7 @@ function applyOfflineSession(cashier) {
   state.store = data.store;
   state.register = data.register;
   state.currency = data.currency || "с";
+  state.printCustomerReceipt = data.printer?.customer_receipt !== false;
   state.menu = data.menu;
   state.shift = offlineShift();
 }
@@ -392,6 +393,7 @@ function applySession(session) {
   state.currency = session.currency || "с";
   state.register = session.register;
   state.store = session.store;
+  state.printCustomerReceipt = session.print_customer_receipt !== false;
   offline.rememberShift(session.shift);
 }
 
@@ -1127,14 +1129,14 @@ function openPaymentDialog(target) {
   const total = round2(target.total);
   let method = "cash";
   let received = "";
-  let printReceipt = true;
+  let printReceipt = state.printCustomerReceipt !== false;
   const modal = openModal(`
     <div class="modal-head"><h3>${target.kind === "sale" ? "Оплата" : `Оплата заказа № ${escapeHtml(target.order.order_number)}`}</h3><button class="modal-close" data-close>×</button></div>
     <div class="pay-layout">
       <div>
         <div class="pay-total"><span>К оплате</span><strong>${money(total)}</strong></div>
         <div class="method-buttons"><button data-method="cash">Наличные</button><button data-method="card">Карта</button></div>
-        <label class="check-row"><input type="checkbox" id="printReceipt" checked> Печатать чек клиенту</label>
+        <label class="check-row"><input type="checkbox" id="printReceipt" ${printReceipt ? "checked" : ""}> Печатать чек клиенту</label>
         <div id="changeBox"></div>
       </div>
       <div id="cashPanel">
