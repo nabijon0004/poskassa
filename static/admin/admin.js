@@ -979,11 +979,64 @@ const PAYMENT_STATUS = { paid: ["Оплачен", "ok"], unpaid: ["Ждёт оп
 const PRINT_STATUS = { printed: "Напечатан", queued: "В очереди печати", failed: "Не напечатан", not_attempted: "—" };
 const SERVICE_LABELS = { dine_in: "В зале", takeaway: "С собой", delivery: "Доставка" };
 
+const ORDERS_PAGE_SIZE = 25;
+const ORDER_FILTERS = ["source", "service_type", "code", "created_from", "created_to", "min_total", "max_total"];
+
+// The filters as the API takes them: the times typed in the browser's zone, "to" with its whole minute.
+function orderQuery(params, pageNumber) {
+  const query = new URLSearchParams({ limit: ORDERS_PAGE_SIZE, offset: (pageNumber - 1) * ORDERS_PAGE_SIZE });
+  for (const name of ORDER_FILTERS) {
+    const value = params.get(name);
+    if (!value) continue;
+    if (name === "created_from" || name === "created_to") {
+      const time = new Date(value).getTime();
+      if (Number.isNaN(time)) continue;
+      query.set(name, new Date(name === "created_to" ? time + 59999 : time).toISOString());
+    } else {
+      query.set(name, value);
+    }
+  }
+  return query;
+}
+
+function paginationHtml(pageNumber, pages) {
+  if (pages <= 1) return "";
+  const numbers = [...new Set([1, pageNumber - 1, pageNumber, pageNumber + 1, pages])].filter((number) => number >= 1 && number <= pages).sort((a, b) => a - b);
+  const buttons = [];
+  numbers.forEach((number, index) => {
+    if (index && number - numbers[index - 1] > 1) buttons.push(`<span class="hint" style="margin:0">…</span>`);
+    buttons.push(`<button class="btn btn-small ${number === pageNumber ? "btn-primary" : ""}" data-page="${number}" ${number === pageNumber ? "disabled" : ""}>${number}</button>`);
+  });
+  return `
+    <button class="btn btn-small" data-page="${pageNumber - 1}" ${pageNumber > 1 ? "" : "disabled"}>‹ Назад</button>
+    ${buttons.join("")}
+    <button class="btn btn-small" data-page="${pageNumber + 1}" ${pageNumber < pages ? "" : "disabled"}>Вперёд ›</button>`;
+}
+
 async function renderOrders(page, storeId) {
-  const orders = await api(`/api/admin/stores/${storeId}/orders`);
+  const params = routeParams();
+  const pageNumber = Math.max(1, Number.parseInt(params.get("page"), 10) || 1);
+  const { total, orders } = await api(`/api/admin/stores/${storeId}/orders?${orderQuery(params, pageNumber)}`);
+  const pages = Math.max(1, Math.ceil(total / ORDERS_PAGE_SIZE));
   const store = storeById(storeId);
+  const option = (name, value, label) => `<option value="${value}" ${params.get(name) === value ? "selected" : ""}>${label}</option>`;
+  const input = (name, attributes) => `<input name="${name}" value="${escapeHtml(params.get(name) || "")}" ${attributes}>`;
+  const filtered = ORDER_FILTERS.some((name) => params.get(name));
+  const first = (pageNumber - 1) * ORDERS_PAGE_SIZE;
   page.innerHTML = `
-    ${pageHead(`Заказы · ${store.name}`, "Последние 50 заказов точки.")}
+    ${pageHead(`Заказы · ${store.name}`, "Заказы точки, новые сверху.")}
+    <section class="card">
+      <form id="ordersFilter" class="filters">
+        <label class="field">Откуда<select name="source">${option("source", "", "Все")}${option("source", "pos", "Касса")}${option("source", "kiosk", "Киоск")}</select></label>
+        <label class="field">Тип заказа<select name="service_type">${option("service_type", "", "Все")}${Object.entries(SERVICE_LABELS).map(([value, label]) => option("service_type", value, label)).join("")}</select></label>
+        <label class="field">Номер или код${input("code", `type="search" maxlength="40" autocomplete="off" placeholder="Например, 16"`)}</label>
+        <label class="field">Время с${input("created_from", `type="datetime-local"`)}</label>
+        <label class="field">Время по${input("created_to", `type="datetime-local"`)}</label>
+        <label class="field">Сумма от${input("min_total", `type="number" min="0" step="0.01" inputmode="decimal"`)}</label>
+        <label class="field">Сумма до${input("max_total", `type="number" min="0" step="0.01" inputmode="decimal"`)}</label>
+        <div class="btn-row"><button class="btn btn-primary" type="submit">Найти</button>${filtered ? `<button class="btn" type="button" id="resetOrders">Сбросить</button>` : ""}</div>
+      </form>
+    </section>
     <section class="card">
       ${orders.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>№</th><th>Код</th><th>Время</th><th>Откуда</th><th>Касса</th><th>Кассир</th><th>Статус</th><th>Печать</th><th class="num">Сумма</th><th></th></tr></thead><tbody>${orders.map((order) => `
         <tr>
@@ -997,8 +1050,25 @@ async function renderOrders(page, storeId) {
           <td>${PRINT_STATUS[order.print_status] || escapeHtml(order.print_status)}</td>
           <td class="num">${money(order.total)}</td>
           <td class="actions"><button class="btn btn-small" data-reprint="${escapeHtml(order.order_ref)}">Печать на кухню</button></td>
-        </tr>`).join("")}</tbody></table></div>` : `<p class="empty">Заказов пока нет.</p>`}
+        </tr>`).join("")}</tbody></table></div>
+      <div class="btn-row" style="margin-top:12px;align-items:center;flex-wrap:wrap">
+        <span class="hint" style="margin:0">${first + 1}–${first + orders.length} из ${total}</span>
+        ${paginationHtml(pageNumber, pages)}
+      </div>` : `<p class="empty">${filtered ? "Заказов по этим условиям нет." : total ? "На этой странице заказов нет." : "Заказов пока нет."}</p>`}
     </section>`;
+  const form = page.querySelector("#ordersFilter");
+  const show = (values) => navigate(`#/store/${storeId}/orders${values.toString() ? `?${values}` : ""}`);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    show(filterValues(form));
+  });
+  page.querySelector("#resetOrders")?.addEventListener("click", () => show(new URLSearchParams()));
+  page.querySelectorAll("[data-page]").forEach((button) => button.addEventListener("click", () => {
+    const values = new URLSearchParams(params);
+    values.delete("page");
+    if (Number(button.dataset.page) > 1) values.set("page", button.dataset.page);
+    show(values);
+  }));
   page.querySelectorAll("[data-reprint]").forEach((button) => button.addEventListener("click", async () => {
     try {
       const printed = await api(`/api/admin/stores/${storeId}/print`, { method: "POST", body: { order_ref: button.dataset.reprint } });

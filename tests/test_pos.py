@@ -459,3 +459,41 @@ def test_delivery_saves_the_customer_and_fills_the_address_by_phone(client, monk
     takeaway = sell(client, headers, {**delivery, "service_type": "takeaway", "customer_phone": "900000000", "delivery_address": "x"})
     assert takeaway.json()["customer_phone"] is None
     assert client.get("/api/pos/customers?phone=900000000", headers=headers).json() == []
+
+
+def test_admin_filters_and_pages_the_store_orders(client):
+    add_cashier(client)
+    headers = login(client)
+    open_shift(client, headers)
+    kiosk = kiosk_order(client, [{"product_id": "108", "quantity": 1}])
+    sales = [
+        sell(client, headers, {"items": [{"product_id": "108", "quantity": count}], "payment_method": "card",
+                               "service_type": "takeaway"}).json()
+        for count in (1, 2, 3)
+    ]
+
+    def orders(**params):
+        response = client.get("/api/admin/stores/1/orders", headers=ADMIN, params=params)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    everything = orders()
+    assert everything["total"] == 4
+    assert [order["order_ref"] for order in everything["orders"]] == [
+        *(sale["order_ref"] for sale in reversed(sales)), kiosk["order_ref"]
+    ]
+    assert [order["source"] for order in orders(source="kiosk")["orders"]] == ["kiosk"]
+    assert orders(source="pos")["total"] == 3
+    assert orders(service_type="delivery")["total"] == 0
+    assert [order["order_ref"] for order in orders(code=sales[1]["order_ref"].lower())["orders"]] == [sales[1]["order_ref"]]
+    by_number = orders(code=sales[1]["order_number"])["orders"]
+    assert sales[1]["order_ref"] in [order["order_ref"] for order in by_number]
+    assert orders(code="Ё" * 40)["total"] == 0
+    assert [order["total"] for order in orders(min_total="150", max_total="250")["orders"]] == [200]
+    assert orders(created_from="2000-01-01T00:00:00Z", created_to="2000-01-02T00:00:00Z")["total"] == 0
+    assert orders(created_from="2000-01-01T00:00:00Z")["total"] == 4
+
+    second_page = orders(limit=3, offset=3)
+    assert second_page["total"] == 4
+    assert [order["order_ref"] for order in second_page["orders"]] == [kiosk["order_ref"]]
+    assert client.get("/api/admin/stores/1/orders", headers=ADMIN, params={"source": "web"}).status_code == 422

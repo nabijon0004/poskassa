@@ -42,7 +42,7 @@ def test_a_job_is_taken_once_and_offered_again_if_the_agent_does_not_report(clie
         json={"status": "failed", "error": "Нет связи с принтером"},
     )
     assert failed.status_code == 200
-    orders = client.get("/api/admin/stores/1/orders", headers=ADMIN).json()
+    orders = client.get("/api/admin/stores/1/orders", headers=ADMIN).json()["orders"]
     assert orders[0]["order_ref"] == created["order_ref"]
     assert orders[0]["print_status"] == "failed"
 
@@ -52,7 +52,7 @@ def test_old_jobs_are_not_printed_late(client, monkeypatch):
     order(client)
     age_jobs("created_at", timedelta(minutes=20))
     assert take_print_jobs(client)[1] == []
-    assert client.get("/api/admin/stores/1/orders", headers=ADMIN).json()[0]["print_status"] == "failed"
+    assert client.get("/api/admin/stores/1/orders", headers=ADMIN).json()["orders"][0]["print_status"] == "failed"
 
 
 def test_agent_needs_a_register_of_the_same_store(client, monkeypatch):

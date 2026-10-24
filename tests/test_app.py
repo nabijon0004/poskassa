@@ -194,7 +194,7 @@ def test_existing_order_mode_is_migrated_to_local(client):
     public_orders = client.get(
         "/api/admin/stores/1/orders",
         headers={"Authorization": "Bearer test-staff-secret"},
-    ).json()
+    ).json()["orders"]
 
     assert row["mode"] == "local"
     assert "mode" not in public_orders[0]
@@ -392,7 +392,7 @@ def test_created_order_is_printed_once_as_kitchen_receipt(client, monkeypatch):
     assert len(sent) == 1
     assert take_print_jobs(client)[1] == []
     orders = client.get("/api/admin/stores/1/orders", headers={"Authorization": "Bearer test-staff-secret"})
-    assert orders.json()[0]["print_status"] == "printed"
+    assert orders.json()["orders"][0]["print_status"] == "printed"
     data = sent[0]
     number = response.json()["order_number"].encode("ascii")
     assert data.startswith(b"\x1b@\x1bt\x11")
@@ -561,9 +561,9 @@ def test_staff_can_reprint_existing_local_order_without_creating_an_order(client
         headers=headers,
         json={"order_ref": created.json()["order_ref"]},
     )
-    assert client.get("/api/admin/stores/1/orders", headers=headers).json()[0]["print_status"] == "queued"
+    assert client.get("/api/admin/stores/1/orders", headers=headers).json()["orders"][0]["print_status"] == "queued"
     _, sent = take_print_jobs(client)
-    orders = client.get("/api/admin/stores/1/orders", headers=headers).json()
+    orders = client.get("/api/admin/stores/1/orders", headers=headers).json()["orders"]
 
     assert printed.status_code == 200
     assert orders[0]["print_status"] == "printed"
@@ -702,7 +702,7 @@ def test_orders_above_1000_somoni_must_go_to_cash_desk(client):
     assert "через кассу" in over_limit.json()["detail"]
     assert weighted_over_limit.status_code == 422
     headers = {"Authorization": "Bearer test-staff-secret"}
-    assert len(client.get("/api/admin/stores/1/orders", headers=headers).json()) == 1
+    assert len(client.get("/api/admin/stores/1/orders", headers=headers).json()["orders"]) == 1
 
 
 def test_customer_must_choose_dine_in_or_takeaway(client, monkeypatch):
@@ -733,7 +733,7 @@ def test_customer_must_choose_dine_in_or_takeaway(client, monkeypatch):
     assert b"\x1d!\x11" + "С СОБОЙ".encode("cp866") in sent[0]
     assert b"\x1d!\x11" + "В ЗАЛЕ".encode("cp866") in sent[1]
 
-    orders = client.get("/api/admin/stores/1/orders", headers=headers).json()
+    orders = client.get("/api/admin/stores/1/orders", headers=headers).json()["orders"]
     assert [entry["service_type"] for entry in orders] == ["dine_in", "takeaway"]
     exported = client.get("/api/admin/report.csv", headers=headers).text
     assert "В зале / с собой" in exported
