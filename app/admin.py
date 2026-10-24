@@ -1017,14 +1017,62 @@ def reprint_order(store_id: int, payload: PrintInput, authorization: Authorizati
     }
 
 
+def utc_iso(moment: datetime) -> str:
+    """A time as the orders store it; a time without a zone is the server's local time."""
+    return moment.astimezone(timezone.utc).isoformat()
+
+
 @router.get("/api/admin/stores/{store_id}/orders")
-def admin_orders(store_id: int, authorization: Authorization = None) -> list[dict[str, Any]]:
+def admin_orders(
+    store_id: int,
+    authorization: Authorization = None,
+    source: Literal["pos", "kiosk"] | None = None,
+    service_type: Literal["dine_in", "takeaway", "delivery"] | None = None,
+    code: Annotated[str, Query(max_length=40)] = "",
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    min_total: Annotated[Decimal | None, Query(ge=0)] = None,
+    max_total: Annotated[Decimal | None, Query(ge=0)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    """The store's orders, newest first; `code` is the number on the receipt or a part of the order code."""
     require_store(authorization, store_id)
+    conditions = ["store_id = ?"]
+    values: list[Any] = [store_id]
+    if source is not None:
+        conditions.append("source = ?")
+        values.append(source)
+    if service_type is not None:
+        conditions.append("service_type = ?")
+        values.append(service_type)
+    code = code.strip().upper()
+    if code.isascii() and code.isdigit() and len(code) <= 9:
+        # The number on the receipt (it starts again after ORDER_NUMBER_MAX) or a part of the code.
+        conditions.append("((store_seq - 1) % ? + 1 = ? OR instr(order_number, ?) > 0)")
+        values += [core.ORDER_NUMBER_MAX, int(code), code]
+    elif code:
+        conditions.append("instr(UPPER(order_number), ?) > 0")
+        values.append(code)
+    if created_from is not None:
+        conditions.append("created_at >= ?")
+        values.append(utc_iso(created_from))
+    if created_to is not None:
+        conditions.append("created_at <= ?")
+        values.append(utc_iso(created_to))
+    if min_total is not None:
+        conditions.append("total >= ?")
+        values.append(float(min_total))
+    if max_total is not None:
+        conditions.append("total <= ?")
+        values.append(float(max_total))
+    where = " AND ".join(conditions)
     with closing(core.connect_db()) as connection:
+        total = connection.execute(f"SELECT COUNT(*) FROM orders WHERE {where}", values).fetchone()[0]
         rows = connection.execute(
-            "SELECT * FROM orders WHERE store_id = ? ORDER BY id DESC LIMIT 50", (store_id,)
+            f"SELECT * FROM orders WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?", [*values, limit, offset]
         ).fetchall()
-        return [pos.pos_order(connection, row) for row in rows]
+        return {"total": total, "orders": [pos.pos_order(connection, row) for row in rows]}
 
 
 # --- reports ---------------------------------------------------------------------
